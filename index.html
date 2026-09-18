@@ -270,6 +270,16 @@
     <hr class="sep">
 
     <div class="field-group">
+      <div class="fg-label">자동 정렬 (ICP)</div>
+      <button id="btn-auto-align">자동 정렬 — 5개 카메라 계산</button>
+      <div class="mini" id="auto-status">아직 실행 안 함</div>
+      <div class="mini" id="auto-report"></div>
+      <div class="mini">라이다 점군에 카메라 점군을 맞추는 이동·회전량을 계산해 <b>화면에만 적용</b>합니다. 저장은 ③에서 직접 눌러야 합니다. 겹침·정합 품질·보정량이 기준을 못 넘기거나 방향이 구속되지 않으면 그 카메라(또는 그 축)는 원래값을 유지하고 이유를 표시합니다.</div>
+    </div>
+
+    <hr class="sep">
+
+    <div class="field-group">
       <div class="fg-label"><span class="step">3</span>URDF &lt;origin&gt; 저장</div>
       <div id="urdfbox"></div>
       <div class="btnrow">
@@ -836,6 +846,86 @@ window.addEventListener('keydown', (e)=>{
   if(e.key==='r') document.getElementById('mode-rotate').click();
 });
 document.getElementById('btn-refresh-data').addEventListener('click', refreshAllClouds);
+
+// ---------- 자동 정렬 (ICP) ----------
+// 계산은 서버의 auto_calib.py 가 한다. 여기서 보내는 건 '화면의 현재 상태' 전부다:
+// 초기 origin(손으로 조정한 값 포함)과 마운트 체인. 상수를 파이썬에 복사해 두면
+// index.html 을 고칠 때 조용히 어긋나므로 계산기에는 값을 남기지 않는다.
+function buildAutoRequest(){
+  return {
+    lidar: { file: LIDAR.file, xyz: LIDAR.pos, quat: LIDAR.quat },
+    cams: CAMERAS.map(cam=>{
+      const g = state.camObjs[cam.key].group;
+      const rpy = quatToRpy(g.quaternion);
+      const mq = new THREE.Quaternion(...cam.mountQ1).multiply(new THREE.Quaternion(...MOUNT_Q2));
+      return {
+        key: cam.key,
+        file: cam.file,
+        xyz: [g.position.x, g.position.y, g.position.z],
+        rpy: [rpy.roll, rpy.pitch, rpy.yaw],
+        mount: { xyz: cam.mountT, quat: [mq.x, mq.y, mq.z, mq.w] },
+      };
+    }),
+  };
+}
+
+function autoReportLine(r){
+  const label = (CAMERAS.find(c=>c.key===r.key) || {}).label || r.key;
+  const nums = [];
+  if(typeof r.fitness === 'number') nums.push(`fitness ${r.fitness.toFixed(2)}`);
+  if(typeof r.inlier_rmse === 'number') nums.push(`rmse ${(r.inlier_rmse*1000).toFixed(1)}mm`);
+  if(typeof r.lidar_in_view === 'number') nums.push(`라이다 ${r.lidar_in_view}점`);
+  const tail = nums.length ? ` · ${nums.join(', ')}` : '';
+  if(!r.ok) return `<b>${label}</b>: 유지 — ${r.reason || '원인 불명'}${tail}`;
+  const fix = `이동 ${r.delta_trans_norm_mm.toFixed(1)}mm, 회전 ${r.delta_rot_norm_deg.toFixed(2)}°`;
+  const dropped = (r.dropped_dofs && r.dropped_dofs.length)
+    ? ` · 관측 불가로 제외: ${r.dropped_dofs.join(', ')}` : '';
+  return `<b>${label}</b>: 적용 (${fix})${tail}${dropped}`;
+}
+
+async function autoAlign(){
+  const statusEl = document.getElementById('auto-status');
+  const reportEl = document.getElementById('auto-report');
+  const btn = document.getElementById('btn-auto-align');
+  btn.disabled = true;
+  const prevLabel = btn.textContent;
+  btn.textContent = '계산 중...';
+  statusEl.textContent = '점군 정합 계산 중 (카메라 5대, 수 초~수십 초)...';
+  reportEl.innerHTML = '';
+  try{
+    let res;
+    try{
+      res = await fetch('/auto_align', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(buildAutoRequest()),
+      });
+    }catch(netErr){
+      throw new Error('서버에 연결할 수 없습니다 (로봇에서 직접 연 페이지에서만 동작) — ' + netErr.message);
+    }
+    const data = await res.json().catch(()=>null);
+    if(!res.ok || !data || data.error) throw new Error((data && data.error) || ('HTTP ' + res.status));
+
+    let applied = 0;
+    (data.results || []).forEach(r=>{
+      if(!r.ok) return;
+      const obj = state.camObjs[r.key];
+      if(!obj) return;
+      obj.group.position.set(r.xyz[0], r.xyz[1], r.xyz[2]);
+      obj.group.quaternion.copy(rpyToQuat(r.rpy[0], r.rpy[1], r.rpy[2]));
+      applied++;
+    });
+    updateReadout();
+    reportEl.innerHTML = (data.results || []).map(autoReportLine).join('<br>');
+    statusEl.textContent = `${applied}/${(data.results||[]).length} 카메라 적용 — 화면에만 반영됨. 확인 후 ③에서 저장하세요 (${new Date().toLocaleTimeString('ko-KR')})`;
+  }catch(err){
+    statusEl.textContent = '자동 정렬 실패 — ' + err.message;
+  }finally{
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+  }
+}
+document.getElementById('btn-auto-align').addEventListener('click', autoAlign);
 // ---------- 불러오기: 잃을 게 있을 때만 2단계 확인 (오클릭 방지) ----------
 // 저장(만들기)은 새 파일만 만들어 안전 -> 마찰 없음.
 // 불러오기는 화면 조정값을 되돌릴 수 없게 버림 -> 변경된 카메라가 있으면 두 번 눌러야 실행.

@@ -1,4 +1,4 @@
-import os, re, shlex, time, subprocess, http.server, socketserver
+import os, re, sys, json, shlex, time, tempfile, subprocess, http.server, socketserver
 
 # 설치 위치에 상관없이 동작하도록 이 스크립트가 있는 디렉터리를 기준으로 삼는다.
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -9,6 +9,9 @@ PORT = int(os.environ.get("RANGER_CALIB_PORT", "8080"))
 os.chdir(ROOT)
 
 CAPTURE_SCRIPT = os.path.join(ROOT, "capture_once.py")
+# 자동 정렬은 ROS 를 쓰지 않는다 (numpy/scipy 만 필요). 그래서 이 서버와 같은 인터프리터로 돌린다.
+AUTO_SCRIPT = os.path.join(ROOT, "auto_calib.py")
+AUTO_TIMEOUT = 120
 CAPTURE_CMD = (
     "source /opt/ros/humble/setup.bash; "
     "export ROS_DOMAIN_ID=18; "
@@ -101,6 +104,49 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(b"capture timed out")
+        elif self.path == "/auto_align":
+            # 화면의 현재 상태(초기 origin + 마운트 체인)를 그대로 받아 auto_calib.py 에 넘긴다.
+            # 서버가 상수를 들고 있으면 index.html 과 어긋나므로 중계만 한다.
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as tf:
+                    tf.write(body)
+                    tmp_path = tf.name
+                # 인코딩을 명시해야 한다. 생략하면 부모가 로케일 인코딩(예: Windows cp949)으로
+                # 디코딩을 시도하고, 한글이 든 JSON 에서 UnicodeDecodeError 가 나면서
+                # proc.stdout 이 조용히 None 이 된다.
+                proc = subprocess.run([sys.executable, AUTO_SCRIPT, tmp_path],
+                                      capture_output=True, text=True,
+                                      encoding="utf-8", errors="replace", timeout=AUTO_TIMEOUT)
+                if proc.returncode != 0 or not (proc.stdout or "").strip():
+                    # stderr 를 그대로 올려야 scipy 미설치 같은 원인이 브라우저에서 바로 보인다.
+                    msg = (proc.stderr or proc.stdout or "auto_calib.py 실행 실패").strip()
+                    print(msg, flush=True)
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": msg}, ensure_ascii=False).encode("utf-8"))
+                    return
+                out = proc.stdout.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+            except subprocess.TimeoutExpired:
+                self.send_response(504)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "자동 정렬 시간 초과 (%ds)" % AUTO_TIMEOUT},
+                                            ensure_ascii=False).encode("utf-8"))
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
         elif self.path == "/save_urdf":
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode("utf-8")
