@@ -12,6 +12,14 @@ CAPTURE_SCRIPT = os.path.join(ROOT, "capture_once.py")
 # 자동 정렬은 ROS 를 쓰지 않는다 (numpy/scipy 만 필요). 그래서 이 서버와 같은 인터프리터로 돌린다.
 AUTO_SCRIPT = os.path.join(ROOT, "auto_calib.py")
 AUTO_TIMEOUT = 120
+
+# 로봇 반영(실사용 URDF 교체 + 서비스 재시작)은 되돌리기 어려운 동작이다.
+# 이 서버는 인증이 없고 0.0.0.0 에 열리므로, 같은 네트워크의 누구나 호출할 수 있다.
+# 그래서 기본은 막아 두고 환경변수로 명시적으로 켠 경우에만 허용한다.
+#   RANGER_ALLOW_DEPLOY=1 python3 calib_server.py
+DEPLOY_SCRIPT = os.path.join(ROOT, "deploy_urdf.sh")
+DEPLOY_TIMEOUT = 90
+ALLOW_DEPLOY = os.environ.get("RANGER_ALLOW_DEPLOY") == "1"
 CAPTURE_CMD = (
     "source /opt/ros/humble/setup.bash; "
     "export ROS_DOMAIN_ID=18; "
@@ -147,6 +155,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         os.unlink(tmp_path)
                     except OSError:
                         pass
+        elif self.path == "/deploy_urdf":
+            self.handle_deploy()
         elif self.path == "/save_urdf":
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode("utf-8")
@@ -166,6 +176,67 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def handle_deploy(self):
+        """deploy_urdf.sh 를 돌려 실사용 URDF 를 교체하고 cona 를 재시작한다.
+
+        스크립트 출력을 그대로 브라우저에 올린다. 실패 사유(백업 실패, sudo 권한,
+        서비스가 안 올라옴)가 화면에서 바로 읽혀야 다음 조치를 할 수 있다.
+        """
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            req = {}
+        action = req.get("action", "deploy")
+        urdf_file = req.get("file")
+
+        def reply(code, text):
+            body = text.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        if not ALLOW_DEPLOY:
+            reply(403, "로봇 반영이 꺼져 있습니다. 서버를 다음처럼 다시 띄우십시오:\n"
+                       "  RANGER_ALLOW_DEPLOY=1 python3 calib_server.py\n\n"
+                       "이 서버는 인증이 없고 0.0.0.0 에 열리므로, 켜 두면 같은 네트워크의\n"
+                       "누구나 실사용 URDF 를 바꾸고 서비스를 재시작할 수 있습니다.")
+            return
+        if not os.path.isfile(DEPLOY_SCRIPT):
+            reply(500, "deploy_urdf.sh 가 없습니다: %s" % DEPLOY_SCRIPT)
+            return
+
+        # 절대경로를 그대로 넘기면 Windows 백슬래시가 bash 에서 깨진다.
+        # cwd 를 저장소로 두고 상대경로만 넘기면 두 OS 에서 같이 동작한다.
+        # 대상 경로는 서버가 이미 해석해 둔 값을 넘긴다. 스크립트가 따로 해석하면
+        # 두 값이 갈릴 수 있고, 일부 환경에서는 자식 프로세스가 환경변수를 못 받는다.
+        cmd = ["bash", os.path.basename(DEPLOY_SCRIPT),
+               "--target", LIVE_URDF_PATH.replace("\\", "/")]
+        if action == "rollback":
+            cmd.append("--rollback")
+        elif urdf_file:
+            # 경로 주입 방지: urdf/ 안의 파일명만 받는다
+            name = os.path.basename(urdf_file)
+            if not os.path.isfile(os.path.join(URDF_OUT_DIR, name)):
+                reply(400, "urdf/ 안에 그런 파일이 없습니다: %s" % name)
+                return
+            cmd.append("urdf/" + name)
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=DEPLOY_TIMEOUT, cwd=ROOT)
+        except subprocess.TimeoutExpired:
+            reply(504, "로봇 반영 시간 초과 (%ds). 서비스 상태를 직접 확인하십시오:\n"
+                       "  systemctl status cona" % DEPLOY_TIMEOUT)
+            return
+
+        out = (proc.stdout or "") + (proc.stderr or "")
+        print(out, end="", flush=True)      # 서버 콘솔에도 남긴다
+        reply(200 if proc.returncode == 0 else 500, out or "출력 없음")
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")

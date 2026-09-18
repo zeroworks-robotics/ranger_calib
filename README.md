@@ -23,6 +23,7 @@ Ranger 로봇의 RGBD 카메라 외부 파라미터(extrinsic)를 브라우저�
 | `index.html` | 3D 정렬 웹 UI (three.js) |
 | `urdf/` | 기준 URDF 및 저장 결과 URDF |
 | `data/` | 캡처된 포인트클라우드 스냅샷 (JSON) |
+| `deploy_urdf.sh` | 결과 URDF를 실사용 경로에 반영 + `cona` 재시작 (백업·롤백 포함) |
 | `tests/` | 자동 정렬 검증 스크립트 (로봇 없이 실행) |
 
 ## 요구 사항
@@ -221,9 +222,20 @@ right  벽이 시야 안(구석, 현재 거리 0.9m)에 있으나 두 번째 방
        구석쪽으로 더 가까이 붙거나 정면으로 보게 하십시오
 ```
 
+#### 카메라별 잠금 — 이미 맞춘 값을 지키는 장치
+
+자동 정렬은 **정렬 대상으로 선택된 카메라만** 계산합니다. 두 단계(바닥·라이다)가 모두 끝난 카메라는 자동으로 잠기고, 잠긴 카메라는 다음 회차 계산에서 제외됩니다.
+
+이 장치가 없으면 이렇게 됩니다. 전방 4대를 자세 A에서 맞추고, 후방 1대를 맞추려 자세 B로 회전한 뒤 다시 실행하면, **자세 B의 장면으로 5대가 전부 다시 계산되어 앞서 맞춘 4대가 덮입니다.** 자세 B에서 그 4대의 장면이 나쁘면 결과가 나빠집니다.
+
+- `자동 정렬 (ICP)` 항목의 체크박스로 대상을 직접 고를 수 있습니다
+- `적용된 카메라는 자동으로 잠금` 을 끄면 매 회차 전부 다시 계산합니다
+- 바닥 단계만 끝난 카메라는 잠기지 않습니다 — 잠그면 `x`·`y`·`rot_z` 를 영영 못 맞춥니다
+- 잠금은 화면 상태일 뿐이며 저장 파일에는 영향이 없습니다. 페이지를 새로 열면 모두 풀립니다
+
 #### 여러 자세를 거쳐 누적하는 방식
 
-한 번에 5대를 끝낼 필요가 없습니다. 자동 정렬은 조건을 만족한 카메라만 값을 바꾸고 나머지는 **화면의 기존 값을 그대로 둡니다.** 따라서 이렇게 반복하면 결과가 누적됩니다.
+한 번에 5대를 끝낼 필요가 없습니다. 잠금 덕분에 각 카메라는 **가장 좋은 장면을 만난 회차의 결과를 유지**합니다.
 
 1. `최신 URDF 불러오기` (작업 시작 시 한 번만)
 2. 방 구석으로 로봇을 접근시킵니다. `fdown`·`rear` 차례가 오면 **구석에서 1.2 m 이내**까지 붙입니다
@@ -252,7 +264,104 @@ urdf/<원본이름>_calib_<YYYYMMDD_HHMMSS>.urdf   # 이력용 타임스탬프 �
 urdf/<원본이름>_latest.urdf                     # 항상 최신 결과
 ```
 
-원본 URDF는 건드리지 않으므로 여러 번 눌러도 안전합니다. 로봇에 실제로 반영하려면 결과 파일을 `CONA_URDF_PATH` 가 가리키는 위치로 직접 복사하고 관련 노드를 재시작하십시오.
+원본 URDF는 건드리지 않으므로 여러 번 눌러도 안전합니다. 여기까지는 로봇 동작에 아무 영향이 없습니다.
+
+### ④ 로봇에 반영
+
+웹 UI의 `로봇에 반영 — 실사용 URDF 교체 + cona 재시작` 버튼을 누르면 서버가 `deploy_urdf.sh` 를 실행하고, 끝나면 **실파일을 다시 읽어 화면 값과 같은지 자동으로 검사**합니다. 스크립트 출력은 버튼 아래에 원문 그대로 표시됩니다. 되돌리기 어려운 동작이라 두 번 눌러야 실행됩니다.
+
+버튼을 쓰려면 서버를 아래처럼 띄워야 합니다. **기본값은 꺼져 있습니다.**
+
+```bash
+RANGER_ALLOW_DEPLOY=1 python3 calib_server.py
+```
+
+이 서버는 인증이 없고 `0.0.0.0` 에 열립니다. 켜 두면 같은 네트워크의 누구나 실사용 URDF를 바꾸고 `cona` 를 재시작할 수 있으므로, 캘리브레이션 작업 중에만 켜십시오. 끈 상태에서 버튼을 누르면 서버가 `403` 과 함께 그 이유를 돌려줍니다.
+
+재시작은 `sudo -n systemctl restart cona` 로 실행합니다. 암호 없이 sudo가 안 되면 **URDF 교체까지는 끝난 상태로** 멈추고, 화면에 다음 두 가지를 안내합니다.
+
+```bash
+# 1) 터미널에서 직접 마무리
+sudo systemctl restart cona
+
+# 2) 이 명령만 암호 없이 허용 (버튼으로 끝까지 하려면 필요)
+sudo tee /etc/sudoers.d/ranger-calib <<'SUDO'
+cona ALL=(root) NOPASSWD: /bin/systemctl restart cona
+SUDO
+sudo chmod 440 /etc/sudoers.d/ranger-calib
+```
+
+터미널에서 직접 실행할 수도 있습니다.
+
+```bash
+./deploy_urdf.sh
+```
+
+하는 일:
+
+1. `CONA_URDF_PATH` 를 `$CONA_URDF_PATH` → `/etc/coga-robotics/cona/setup.bash` 순으로 찾아 대상 경로를 확정합니다 (`calib_server.py` 와 같은 규칙). 보통 `data/CoNA/urdf/ranger_new_a01.urdf` 입니다
+2. 바뀌는 `camera_*RGBD_link` origin 을 `diff` 로 먼저 출력합니다
+3. 대상 파일을 `<대상>.bak.YYYYMMDD_HHMMSS` 로 백업합니다
+4. `urdf/<스템>_latest.urdf` 를 대상 경로에 씁니다 (같은 디렉터리에 임시 파일로 쓰고 `mv` — 읽는 쪽이 반쯤 쓰인 파일을 보지 않습니다)
+5. `sudo systemctl restart cona` 후 `systemctl is-active` 로 확인합니다. 서비스가 안 올라오면 `journalctl -u cona -n 30` 을 출력하고 종료 코드 1 로 끝냅니다
+
+옵션:
+
+| 옵션 | 동작 |
+| --- | --- |
+| `./deploy_urdf.sh urdf/xxx_calib_20260918_1130.urdf` | 특정 파일 배포 (기본값은 `_latest`) |
+| `--symlink` | 복사 대신 심볼릭 링크로 연결. 저장소 파일이 원본이 되지만 저장소를 옮기면 깨집니다 |
+| `--no-restart` | 파일만 교체. 재시작은 직접 |
+| `--rollback` | 가장 최근 백업으로 되돌리고 재시작 (UI의 `직전 백업으로 되돌리기` 버튼과 같음) |
+| `--target 경로` | 대상 경로를 직접 지정. 웹 UI가 호출할 때 쓰는 방식 — 서버가 이미 해석한 경로를 넘겨 서버와 스크립트의 판단이 갈리지 않게 합니다 |
+
+서비스 이름이 `cona` 가 아니면 `CONA_SERVICE=이름 ./deploy_urdf.sh` 로 넘기십시오.
+
+### ⑤ 반영 확인
+
+세 가지를 확인합니다. 순서대로 하면 어디서 끊겼는지 바로 드러납니다.
+
+**1) 서비스가 살아 있는지** — `deploy_urdf.sh` 가 이미 확인하지만 수동으로도:
+
+```bash
+systemctl is-active cona
+```
+
+**2) `robot_state_publisher` 가 새 값을 읽었는지** — 파일이 아니라 실제 TF 를 봅니다. 파일만 바꿨고 서비스가 다른 URDF 를 읽고 있으면 여기서 어긋납니다.
+
+```bash
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=18
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 run tf2_ros tf2_echo base_link camera_frontRGBD_link
+```
+
+출력의 `Translation` 이 저장한 `<origin xyz>` 와, `Rotation` 의 RPY 가 `<origin rpy>` 와 같아야 합니다.
+
+**3) 왕복 확인** — 버튼으로 반영했다면 **자동으로 수행됩니다.** 배포 직후 실파일을 다시 읽어 화면 값과 비교하고 결과를 표시합니다.
+
+```
+반영·확인 완료 — 실파일이 화면 값과 일치 (최대 차이 0.000mm / 0.0000°)
+```
+
+어긋나면 이렇게 나옵니다.
+
+```
+주의 — 실파일이 화면 값과 다릅니다: Rear 기준 12.40mm / 0.310°.
+다른 URDF 를 읽고 있는지 확인하고, 필요하면 되돌리십시오
+```
+
+수동으로 하려면 ①의 `최신 URDF 불러오기` 를 누르고 다음을 확인합니다.
+
+- 기준 원본 표시가 실사용 URDF 파일명으로 바뀌고 `5/5 카메라 동기화` 가 떠야 합니다
+- **점군이 전혀 움직이지 않아야 합니다.** 움직이면 방금 저장한 값과 로봇이 읽는 값이 다르다는 뜻입니다
+- `위치 (m)`·`회전 R/P/Y` 값이 저장 직전과 같고, 변경 표시(주황 테두리)가 없어야 합니다
+
+이 단계에서 점군이 튀면 되돌리고 원인을 찾으십시오.
+
+```bash
+./deploy_urdf.sh --rollback
+```
 
 ## 서버 없이 캡처만 하기
 
@@ -412,6 +521,8 @@ $env:RANGER_CALIB_PORT = "8099"
 | `RANGER_CALIB_PORT` | `8080` | 웹 서버 포트 |
 | `CONA_URDF_PATH` | (기체 설정파일에서 읽음) | 실사용 URDF 경로. 상대·절대 경로 모두 허용하며 디렉터리를 줘도 됩니다 |
 | `ROBOT_SETUP` | `/etc/coga-robotics/cona/setup.bash` | `CONA_URDF_PATH` 를 찾을 기체 설정파일 |
+| `RANGER_ALLOW_DEPLOY` | (꺼짐) | `1` 이면 UI의 `로봇에 반영` 버튼 허용. 인증이 없는 서버이므로 작업 중에만 켜십시오 |
+| `CONA_SERVICE` | `cona` | 재시작할 systemd 유닛 이름 (`deploy_urdf.sh` 용) |
 
 URDF 경로 결정 순서:
 
@@ -431,6 +542,7 @@ URDF 경로 결정 순서:
 | `POST` | `/refresh_snapshot` | `capture_once.py` 실행. 6개 전부 성공 시 `200`, 부분 성공/실패 `500`, 15초 초과 `504` |
 | `POST` | `/auto_align` | 본문(화면 현재 상태 JSON)으로 `auto_calib.py` 실행. 카메라별 제안 origin·단계별 판정 근거·장면 가이드(`advice`)와 라이다가 본 벽 목록(`lidar_walls`)을 JSON 으로 반환. 저장은 하지 않음 |
 | `POST` | `/save_urdf` | 본문(URDF 전문)을 `urdf/` 밑에 타임스탬프 파일 + `_latest` 로 저장. 응답 본문은 저장 경로 |
+| `POST` | `/deploy_urdf` | 본문 `{"action":"deploy"\|"rollback","file":"…"}` 로 `deploy_urdf.sh` 실행. 응답은 스크립트 출력 원문. `RANGER_ALLOW_DEPLOY=1` 없이는 `403` |
 | `GET` | 그 외 | 저장소 디렉터리의 정적 파일 (`index.html`, `data/*.json`) |
 
 ## 문제 해결

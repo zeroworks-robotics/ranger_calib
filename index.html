@@ -198,6 +198,26 @@
   .mini{font-size:11px; color:var(--text-dim); line-height:1.5;}
   .mini b{color:var(--text);}
 
+  /* 카메라별 정렬 대상 선택 — 이미 맞춘 카메라를 다음 회차에서 빼기 위한 것 */
+  .lockrow{display:flex; flex-wrap:wrap; gap:5px;}
+  .lockrow label{
+    display:flex; align-items:center; gap:5px; font-size:11.5px; cursor:pointer;
+    padding:4px 7px; border:1px solid var(--border); border-radius:5px;
+    background:var(--surface-2); user-select:none;
+  }
+  .lockrow label input{accent-color:var(--accent); margin:0;}
+  .lockrow label.locked{opacity:.55; border-style:dashed;}
+  .lockrow label.locked .nm{text-decoration:line-through;}
+  .lock-opt{display:flex; align-items:center; gap:6px; cursor:pointer;}
+
+  /* 배포 스크립트 출력 — 원문 그대로 봐야 원인이 드러난다 */
+  pre.log{
+    font-family:var(--mono); font-size:10.5px; line-height:1.45; margin:0;
+    background:var(--surface-2); border:1px solid var(--border); border-radius:5px;
+    padding:8px 9px; max-height:190px; overflow:auto; white-space:pre-wrap;
+    word-break:break-all; color:var(--text);
+  }
+
   /* 장면 가이드 — 거부 사유와 달리 '다음에 할 일'이므로 눈에 띄게 둔다 */
   .advice{color:var(--accent);}
   #auto-report .guide-todo, #auto-report .guide-ok{
@@ -279,9 +299,12 @@
 
     <div class="field-group">
       <div class="fg-label">자동 정렬 (ICP)</div>
-      <button id="btn-auto-align">자동 정렬 — 5개 카메라 계산</button>
+      <div class="lockrow" id="auto-targets"></div>
+      <label class="mini lock-opt"><input type="checkbox" id="auto-lock" checked> 적용된 카메라는 자동으로 잠금</label>
+      <button id="btn-auto-align">자동 정렬 — 잠기지 않은 카메라 계산</button>
       <div class="mini" id="auto-status">아직 실행 안 함</div>
       <div class="mini" id="auto-report"></div>
+      <div class="mini">위 체크박스에서 <b>정렬 대상</b>을 고릅니다. 이미 두 단계가 끝난 카메라는 자동으로 잠기며, 잠긴 카메라는 다음 회차 계산에서 제외돼 <b>값이 덮이지 않습니다.</b> 로봇을 회전해 가며 반복할 때 앞서 맞춘 결과를 지키는 장치입니다 (잠금은 화면 상태일 뿐 저장 파일과는 무관).</div>
       <div class="mini">축마다 기준이 다릅니다. <b>rot_x, rot_y, z</b> 는 카메라가 보는 <b>바닥 평면</b>을 <code>z=0</code> 수평에 맞춰 잡고(절대 기준), <b>x, y, rot_z</b> 는 <b>라이다가 보는 수직 면</b>에 ICP 로 맞춰 잡습니다(상대 기준). 라이다는 바닥을 못 보고(링 스캔), 바닥은 x·y·rot_z 를 구속하지 못하므로 한 기준으로는 6축을 못 잡습니다. 결과는 <b>화면에만 적용</b>되고 저장은 ③에서 직접 눌러야 합니다. 단계별로 따로 판정하므로 한쪽만 적용되는 경우가 정상입니다.</div>
     </div>
 
@@ -296,6 +319,21 @@
       <button id="btn-make-urdf" class="btn-primary" disabled>URDF 만들기 — 새 파일로 저장</button>
       <div class="mini" id="urdf-save-status">잠김 — ①에서 "최신 URDF 불러오기"를 먼저 눌러야 저장할 수 있습니다</div>
       <div class="mini">지금 조정값을 기준 원본 위에 반영해 <code>ranger_calib/urdf/</code> 밑에 <b>새 파일</b>로 저장합니다 — 원본은 절대 안 건드리므로 여러 번 눌러도 안전합니다. <b>①의 불러오기를 하지 않으면 저장할 수 없습니다</b> — 화면에 내장된 예비 URDF를 기준으로 저장하면 실파일에만 있는 내용(초음파 링크 등)이 사라지기 때문입니다.</div>
+    </div>
+
+    <hr class="sep">
+
+    <div class="field-group">
+      <div class="fg-label"><span class="step">4</span>로봇에 반영</div>
+      <div class="danger-zone">
+        <button id="btn-deploy" class="btn-danger">로봇에 반영 — 실사용 URDF 교체 + cona 재시작</button>
+        <div class="btnrow">
+          <button id="btn-rollback">직전 백업으로 되돌리기</button>
+        </div>
+        <div class="mini" id="deploy-status">아직 실행 안 함</div>
+        <pre class="log" id="deploy-log" hidden></pre>
+        <div class="mini">③에서 만든 <code>_latest.urdf</code> 를 <code>CONA_URDF_PATH</code> 가 가리키는 실파일로 교체하고 <code>systemctl restart cona</code> 를 실행합니다. 교체 전 <b>자동으로 백업</b>하며, 끝나면 실파일을 다시 읽어 화면 값과 같은지 검사합니다. <b>로봇이 재시작되므로 주행 중에는 누르지 마십시오.</b> 두 번 눌러야 실행됩니다.</div>
+      </div>
     </div>
 
     <hr class="sep">
@@ -710,6 +748,7 @@ async function init(){
 
   buildLegend();
   buildCamTabs();
+  buildLockRow();
   buildFieldInputs();
   selectCamera('front');
   state.ready = true;
@@ -859,10 +898,40 @@ document.getElementById('btn-refresh-data').addEventListener('click', refreshAll
 // 계산은 서버의 auto_calib.py 가 한다. 여기서 보내는 건 '화면의 현재 상태' 전부다:
 // 초기 origin(손으로 조정한 값 포함)과 마운트 체인. 상수를 파이썬에 복사해 두면
 // index.html 을 고칠 때 조용히 어긋나므로 계산기에는 값을 남기지 않는다.
+// 이미 맞춘 카메라를 다음 회차에서 제외한다. 회전해 가며 반복할 때, 잠그지 않으면
+// 새 자세의 장면으로 5대가 전부 다시 계산돼 앞서 맞춘 값이 덮인다.
+const locked = {};
+function buildLockRow(){
+  const el = document.getElementById('auto-targets');
+  el.innerHTML = '';
+  CAMERAS.forEach(cam=>{
+    const row = document.createElement('label');
+    row.dataset.key = cam.key;
+    row.innerHTML = `<input type="checkbox"${locked[cam.key] ? '' : ' checked'}>`
+      + `<span class="leg-swatch" style="background:#${cam.color.toString(16).padStart(6,'0')}"></span>`
+      + `<span class="nm">${cam.label}</span>`;
+    const cb = row.querySelector('input');
+    cb.addEventListener('change', ()=>{
+      locked[cam.key] = !cb.checked;
+      row.classList.toggle('locked', !cb.checked);
+    });
+    row.classList.toggle('locked', !!locked[cam.key]);
+    el.appendChild(row);
+  });
+}
+function setLocked(key, value){
+  locked[key] = value;
+  const row = document.querySelector(`#auto-targets label[data-key="${key}"]`);
+  if(row){
+    row.querySelector('input').checked = !value;
+    row.classList.toggle('locked', value);
+  }
+}
+
 function buildAutoRequest(){
   return {
     lidar: { file: LIDAR.file, xyz: LIDAR.pos, quat: LIDAR.quat },
-    cams: CAMERAS.map(cam=>{
+    cams: CAMERAS.filter(cam=>!locked[cam.key]).map(cam=>{
       const g = state.camObjs[cam.key].group;
       const rpy = quatToRpy(g.quaternion);
       const mq = new THREE.Quaternion(...cam.mountQ1).multiply(new THREE.Quaternion(...MOUNT_Q2));
@@ -920,7 +989,14 @@ async function autoAlign(){
   btn.disabled = true;
   const prevLabel = btn.textContent;
   btn.textContent = '계산 중...';
-  statusEl.textContent = '점군 정합 계산 중 (카메라 5대, 수 초~수십 초)...';
+  const targets = CAMERAS.filter(c=>!locked[c.key]);
+  if(targets.length === 0){
+    statusEl.textContent = '정렬 대상이 없습니다 — 위에서 카메라를 하나 이상 선택하세요';
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+    return;
+  }
+  statusEl.textContent = `점군 정합 계산 중 (카메라 ${targets.length}대, 수 초~수십 초)...`;
   reportEl.innerHTML = '';
   try{
     let res;
@@ -936,7 +1012,8 @@ async function autoAlign(){
     const data = await res.json().catch(()=>null);
     if(!res.ok || !data || data.error) throw new Error((data && data.error) || ('HTTP ' + res.status));
 
-    let applied = 0;
+    const autoLock = document.getElementById('auto-lock').checked;
+    let applied = 0, lockedNow = [];
     (data.results || []).forEach(r=>{
       if(!r.ok) return;
       const obj = state.camObjs[r.key];
@@ -944,6 +1021,12 @@ async function autoAlign(){
       obj.group.position.set(r.xyz[0], r.xyz[1], r.xyz[2]);
       obj.group.quaternion.copy(rpyToQuat(r.rpy[0], r.rpy[1], r.rpy[2]));
       applied++;
+      // 두 단계가 다 끝난 카메라만 잠근다. 바닥만 적용된 상태에서 잠그면
+      // x, y, rot_z 를 영영 못 맞춘다.
+      if(autoLock && r.floor && r.floor.ok && r.lidar && r.lidar.ok){
+        setLocked(r.key, true);
+        lockedNow.push(r.key);
+      }
     });
     updateReadout();
     let html = (data.results || []).map(autoReportLine).join('<br>');
@@ -953,7 +1036,10 @@ async function autoAlign(){
       html = `<div class="${cls}">${data.guidance.text}</div>` + html;
     }
     reportEl.innerHTML = html;
-    statusEl.textContent = `${applied}/${(data.results||[]).length} 카메라 적용 — 화면에만 반영됨. 확인 후 ③에서 저장하세요 (${new Date().toLocaleTimeString('ko-KR')})`;
+    const lockNote = lockedNow.length
+      ? ` · 두 단계 완료로 잠금: ${lockedNow.map(k=>(CAMERAS.find(c=>c.key===k)||{}).label || k).join(', ')}`
+      : '';
+    statusEl.textContent = `${applied}/${(data.results||[]).length} 카메라 적용 — 화면에만 반영됨. 확인 후 ③에서 저장하세요${lockNote} (${new Date().toLocaleTimeString('ko-KR')})`;
   }catch(err){
     statusEl.textContent = '자동 정렬 실패 — ' + err.message;
   }finally{
@@ -962,6 +1048,100 @@ async function autoAlign(){
   }
 }
 document.getElementById('btn-auto-align').addEventListener('click', autoAlign);
+
+// ---------- 로봇에 반영 (실사용 URDF 교체 + cona 재시작) ----------
+// 되돌리기 어려운 동작이라 두 번 눌러야 실행한다. 서버는 RANGER_ALLOW_DEPLOY=1 없이는 거부한다.
+const DEPLOY_LABEL = '로봇에 반영 — 실사용 URDF 교체 + cona 재시작';
+let deployArmTimer = null;
+function disarmDeploy(){
+  const btn = document.getElementById('btn-deploy');
+  if(deployArmTimer !== null){ clearTimeout(deployArmTimer); deployArmTimer = null; }
+  btn.classList.remove('armed');
+  btn.textContent = DEPLOY_LABEL;
+}
+
+// 배포 후 실파일을 다시 읽어 화면 값과 같은지 본다. 파일만 바뀌고 서비스가 다른
+// URDF 를 읽는 경우를 여기서 잡는다.
+function poseSnapshot(){
+  const snap = {};
+  CAMERAS.forEach(cam=>{
+    const g = state.camObjs[cam.key].group;
+    snap[cam.key] = {pos:[g.position.x, g.position.y, g.position.z], quat:g.quaternion.clone()};
+  });
+  return snap;
+}
+function poseDiff(snap){
+  let maxMm = 0, maxDeg = 0, worst = null;
+  CAMERAS.forEach(cam=>{
+    const g = state.camObjs[cam.key].group;
+    const s = snap[cam.key];
+    const dmm = Math.hypot(g.position.x-s.pos[0], g.position.y-s.pos[1], g.position.z-s.pos[2]) * 1000;
+    const ddeg = g.quaternion.angleTo(s.quat) * R2D;
+    if(dmm > maxMm || ddeg > maxDeg) worst = cam.label;
+    maxMm = Math.max(maxMm, dmm);
+    maxDeg = Math.max(maxDeg, ddeg);
+  });
+  return {maxMm, maxDeg, worst};
+}
+
+async function runDeploy(action){
+  const statusEl = document.getElementById('deploy-status');
+  const logEl = document.getElementById('deploy-log');
+  const btns = [document.getElementById('btn-deploy'), document.getElementById('btn-rollback')];
+  btns.forEach(b=>b.disabled = true);
+  statusEl.textContent = action === 'rollback' ? '되돌리는 중...' : 'URDF 교체 후 cona 재시작 중...';
+  logEl.hidden = true;
+  try{
+    const before = poseSnapshot();
+    let res;
+    try{
+      res = await fetch('/deploy_urdf', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({action}),
+      });
+    }catch(netErr){
+      throw new Error('서버에 연결할 수 없습니다 — ' + netErr.message);
+    }
+    const text = await res.text();
+    logEl.textContent = text;
+    logEl.hidden = false;
+    if(!res.ok) throw new Error('HTTP ' + res.status + ' — 위 로그를 확인하세요');
+
+    if(action === 'rollback'){
+      statusEl.textContent = `되돌리기 완료 (${new Date().toLocaleTimeString('ko-KR')}). ①에서 불러오기로 현재 값을 확인하세요`;
+      return;
+    }
+
+    // 왕복 확인: 실파일을 다시 읽어 방금 반영한 값과 같은지 본다
+    statusEl.textContent = '반영 완료 — 실파일을 다시 읽어 확인 중...';
+    await loadLatestUrdf();
+    const d = poseDiff(before);
+    if(d.maxMm < 0.2 && d.maxDeg < 0.01){
+      statusEl.textContent = `반영·확인 완료 — 실파일이 화면 값과 일치 (최대 차이 ${d.maxMm.toFixed(3)}mm / ${d.maxDeg.toFixed(4)}°)`;
+    }else{
+      statusEl.textContent = `주의 — 실파일이 화면 값과 다릅니다: ${d.worst} 기준 ${d.maxMm.toFixed(2)}mm / ${d.maxDeg.toFixed(3)}°. 다른 URDF 를 읽고 있는지 확인하고, 필요하면 되돌리십시오`;
+    }
+  }catch(err){
+    statusEl.textContent = (action === 'rollback' ? '되돌리기 실패 — ' : '반영 실패 — ') + err.message;
+  }finally{
+    btns.forEach(b=>b.disabled = false);
+    disarmDeploy();
+  }
+}
+
+document.getElementById('btn-deploy').addEventListener('click', ()=>{
+  const btn = document.getElementById('btn-deploy');
+  if(!btn.classList.contains('armed')){
+    btn.classList.add('armed');
+    btn.textContent = '한 번 더 누르면 실행 — cona 가 재시작됩니다';
+    deployArmTimer = setTimeout(disarmDeploy, 5000);
+    return;
+  }
+  disarmDeploy();
+  runDeploy('deploy');
+});
+document.getElementById('btn-rollback').addEventListener('click', ()=>runDeploy('rollback'));
 // ---------- 불러오기: 잃을 게 있을 때만 2단계 확인 (오클릭 방지) ----------
 // 저장(만들기)은 새 파일만 만들어 안전 -> 마찰 없음.
 // 불러오기는 화면 조정값을 되돌릴 수 없게 버림 -> 변경된 카메라가 있으면 두 번 눌러야 실행.
