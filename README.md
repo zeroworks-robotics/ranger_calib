@@ -238,7 +238,42 @@ fdown  PARTIAL | 남은 오차 4.00mm 0.400deg ... 제외축 rot_z,y
 
 30 mm 를 틀어 넣었을 때, 바닥만 있는 장면은 x 를 구속하지 못하므로 보정을 버리고(0.00 mm), 직교 벽이 있는 장면은 전부 되찾습니다(-29.99 mm).
 
-### 3. 웹 UI 확인
+### 3. 눈으로 확인 — 틀어 놓고 되찾게 하기
+
+정답이 있는 데모 데이터를 만들어, 화면에서 어긋난 상태가 자동 정렬로 맞춰지는 것을 직접 봅니다.
+
+```powershell
+& $py tests\make_demo_data.py
+```
+
+이 스크립트는 카메라 5대 점군을 실측 origin으로 펼쳐 합쳐 라이다 점군으로 되돌려 저장하고(정답 origin에서 완벽히 겹치는 상태), 거기서 카메라별로 25~32 mm·1.0~1.2° 틀어 놓은 `urdf/demo_misaligned.urdf` 를 만듭니다.
+
+```powershell
+$env:CONA_URDF_PATH = "urdf\demo_misaligned.urdf"
+$env:RANGER_CALIB_PORT = "8099"
+& $py calib_server.py
+```
+
+`http://127.0.0.1:8099` 에서 `최신 URDF 불러오기` → 점군이 회색 라이다에서 어긋남 → `자동 정렬` → 어긋남이 사라집니다. 실제 실행 결과:
+
+| 카메라 | 틀어 놓음 | 적용된 보정 | 판정 |
+| --- | --- | --- | --- |
+| Front | 30.0 mm / 1.20° | 30.0 mm / 1.20° | 적용 |
+| Right | 28.0 mm / 1.20° | 28.0 mm / 1.20° | 적용 |
+| Rear | 29.2 mm / 1.00° | 28.8 mm / 1.01° | 적용 (y축 제외) |
+| Left | 31.6 mm / 1.13° | 31.5 mm / 1.14° | 적용 |
+| Front-down | 25.0 mm / 1.00° | 없음 | 유지 — 정합 발산 |
+
+`Front-down` 은 시야가 바닥에 치우쳐 평면 하나만 겹치므로 미끄러집니다. 누적 보정이 100 mm를 넘어 발산으로 판정하고 원래값을 유지합니다 — 엉뚱한 값을 적용하는 것보다 안전한 쪽입니다.
+
+확인이 끝나면 원상복구:
+
+```powershell
+git checkout -- data/rslidar_points.json
+Remove-Item data\rslidar_points.json.orig, urdf\demo_misaligned.urdf
+```
+
+### 4. 실데이터로 웹 UI 확인
 
 `CONA_URDF_PATH` 를 저장소 안의 URDF 로 지정하면 불러오기와 저장까지 동작합니다.
 
