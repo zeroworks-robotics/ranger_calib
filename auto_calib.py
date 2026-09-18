@@ -417,14 +417,76 @@ CAM_HFOV_DEG = 80.0          # RGBD 수평 화각 (보수적으로 잡음). 절�
 CAM_VFOV_DEG = 58.0          # 수직 화각
 ROTATE_ROUND_DEG = 5.0       # 회전 안내는 이 단위로 반올림한다
 WALL_DIR_MIN_SEP = 30.0      # 두 벽 방향이 이만큼 달라야 서로 다른 방향으로 센다
+CORNER_MIN_ANGLE = 60.0      # 두 벽 법선이 이만큼 이상 벌어져야 '구석'으로 센다
+CORNER_MAX_DIST = 6.0        # 이보다 먼 구석은 안내에 쓰지 않는다 (m)
+WALL_BAND_MIN = 0.15         # 벽에서 이 높이만큼은 시야에 들어와야 면으로 잡힌다 (m)
 
 
-def wall_guidance(cam_clusters, cam_az, cam_elev, lidar_clusters):
-    """카메라 한 대에 대한 장면 가이드.
+def find_corners(wall_clusters):
+    """수직 면 두 개가 직각으로 만나는 지점(구석)의 위치를 구한다.
+
+    구석으로 접근하면 직각인 두 벽이 한 시야에 들어온다 = x, y, rot_z 가 한 번에 구속된다.
+    박스를 놓을 수 없는 현장에서는 이게 유일한 방법이다.
+
+    벽을 xy 평면의 직선 n·x = n·c 으로 보고 두 직선의 교점을 푼다.
+    """
+    corners = []
+    for i in range(len(wall_clusters)):
+        for j in range(i + 1, len(wall_clusters)):
+            a, b = wall_clusters[i], wall_clusters[j]
+            sep = abs(((a["normal_az_deg"] - b["normal_az_deg"] + 90.0) % 180.0) - 90.0)
+            if sep < CORNER_MIN_ANGLE:
+                continue
+            na = np.array([np.cos(np.radians(a["normal_az_deg"])), np.sin(np.radians(a["normal_az_deg"]))])
+            nb = np.array([np.cos(np.radians(b["normal_az_deg"])), np.sin(np.radians(b["normal_az_deg"]))])
+            # 법선·위치로 각 벽의 원점 거리를 구한다 (위치 방위와 거리로 중심점 복원)
+            ca = a["distance_m"] * np.array([np.cos(np.radians(a["position_az_deg"])),
+                                             np.sin(np.radians(a["position_az_deg"]))])
+            cb = b["distance_m"] * np.array([np.cos(np.radians(b["position_az_deg"])),
+                                             np.sin(np.radians(b["position_az_deg"]))])
+            try:
+                xy = np.linalg.solve(np.vstack([na, nb]), np.array([na @ ca, nb @ cb]))
+            except np.linalg.LinAlgError:
+                continue
+            dist = float(np.linalg.norm(xy))
+            if dist > CORNER_MAX_DIST:
+                continue
+            corners.append({"position_az_deg": azimuth_deg(xy), "distance_m": dist,
+                            "angle_deg": float(sep),
+                            "points": a["points"] + b["points"]})
+    corners.sort(key=lambda c: c["distance_m"])
+    return corners
+
+
+def max_wall_distance(cam_height, cam_elev):
+    """아래를 보는 카메라가 벽 밑동을 볼 수 있는 최대 거리 (m).
+
+    시야 상단 광선이 지평선보다 아래를 향하면(내림각 > 수직화각/2) 그 광선이 바닥에
+    닿는 거리까지만 볼 수 있다. 벽이 그보다 가까워야 밑동이 시야에 들어온다.
+    WALL_BAND_MIN 만큼의 높이는 확보해야 면으로 인식된다.
+    """
+    top_elev = cam_elev + CAM_VFOV_DEG / 2.0
+    if top_elev >= 0.0:
+        return None                      # 지평선을 보므로 거리 제약이 없다
+    usable = cam_height - WALL_BAND_MIN
+    if usable <= 0:
+        return None
+    return float(usable / np.tan(np.radians(-top_elev)))
+
+
+def turn_words(turn):
+    """회전 안내 문구: (방향, 반올림한 각도)."""
+    return ("반시계" if turn > 0 else "시계",
+            int(round(abs(turn) / ROTATE_ROUND_DEG) * ROTATE_ROUND_DEG))
+
+
+def wall_guidance(cam_clusters, cam_az, cam_elev, cam_height, lidar_clusters, corners):
+    """카메라 한 대에 대한 장면 가이드. 벽만으로 해결하는 방법을 안내한다.
 
     cam_clusters: 그 카메라가 실제로 보고 있는 수직 면 (법선 방향별)
-    cam_elev: 광축 내림각. 아래를 보는 카메라는 회전해도 벽이 들어오지 않는다
-    lidar_clusters: 라이다가 360도에서 본 수직 면 = 주변에 벽이 어디 있는지
+    cam_elev: 광축 내림각. 크면 벽 밑동만 보이므로 접근 거리 제약이 생긴다
+    lidar_clusters: 라이다가 360도에서 본 수직 면 = 주변 벽의 방위와 거리
+    corners: 직각으로 만나는 두 벽의 교점. 구석 하나로 두 방향을 동시에 얻는다
     """
     seen = [c["normal_az_deg"] for c in cam_clusters]
     distinct = []
@@ -432,95 +494,105 @@ def wall_guidance(cam_clusters, cam_az, cam_elev, lidar_clusters):
         if all(abs(((az - d + 90.0) % 180.0) - 90.0) >= WALL_DIR_MIN_SEP for d in distinct):
             distinct.append(az)
 
+    reach = max_wall_distance(cam_height, cam_elev)
     out = {"walls_seen": len(distinct),
            "wall_dirs_deg": [round(a, 1) for a in distinct],
            "camera_azimuth_deg": round(cam_az, 1),
-           "camera_elevation_deg": round(cam_elev, 1)}
+           "camera_elevation_deg": round(cam_elev, 1),
+           "turn_deg": 0}
+    if reach is not None:
+        out["max_wall_distance_m"] = round(reach, 2)
 
     if len(distinct) >= 2:
         out["level"] = "ok"
         out["text"] = "벽 방향 2개 이상 보임 — x, y, rot_z 모두 구속 가능"
         return out
 
-    # 아래를 보는 카메라(예: front-down)는 회전으로 해결되지 않는다.
-    # 시야 상단이 지평선보다 아래면 어느 방향으로 돌려도 벽이 들어오지 않는다.
-    if cam_elev + CAM_VFOV_DEG / 2.0 < 0.0:
-        out["level"] = "floor_facing"
-        out["turn_deg"] = 0
-        out["text"] = ("아래를 보는 카메라입니다 (내림각 %.0f도) — 회전만으로는 먼 벽이 시야에 들어오지 않습니다. "
-                       "카메라 앞 바닥에 박스를 %s 놓으십시오 (서로 직각인 두 면이면 세 축 모두 구속). "
-                       "또는 다른 방향 벽에 1m 이내로 붙이면 벽 밑동이 시야에 들어옵니다"
-                       % (-cam_elev, "1개" if len(distinct) == 1 else "2개"))
-        return out
+    # 구석을 우선 노린다. 직각인 두 벽이 한 시야에 들어오면 세 축이 한 번에 구속된다.
+    target, kind = None, None
+    if corners:
+        best = min(corners, key=lambda c: abs(signed_delta_deg(cam_az, c["position_az_deg"])))
+        target, kind = best, "corner"
+    if target is None:
+        usable = [w for w in lidar_clusters
+                  if not distinct
+                  or abs(((w["normal_az_deg"] - distinct[0] + 90.0) % 180.0) - 90.0) >= WALL_DIR_MIN_SEP]
+        if usable:
+            target = min(usable, key=lambda w: abs(signed_delta_deg(cam_az, w["position_az_deg"])))
+            kind = "wall"
 
-    # 라이다가 본 벽 중 이 카메라 시야로 데려올 후보를 찾는다.
-    half = CAM_HFOV_DEG / 2.0
-    candidates = []
-    for w in lidar_clusters:
-        if distinct and abs(((w["normal_az_deg"] - distinct[0] + 90.0) % 180.0) - 90.0) < WALL_DIR_MIN_SEP:
-            continue        # 이미 보고 있는 벽과 같은 방향이면 두 번째 방향이 안 된다
-        turn = signed_delta_deg(cam_az, w["position_az_deg"])
-        candidates.append({"turn_deg": turn, "wall": w})
-    candidates.sort(key=lambda c: abs(c["turn_deg"]))
-
-    if not candidates:
+    if target is None:
         out["level"] = "blocked"
-        out["text"] = ("주변 라이다 점군에서도 쓸 수 있는 벽을 찾지 못함 — "
-                       "로봇을 벽 쪽으로 옮기거나 카메라 시야에 박스를 놓으십시오")
+        out["text"] = ("라이다 점군에서 쓸 수 있는 벽을 찾지 못했습니다 — 로봇을 벽이 있는 곳으로 "
+                       "옮긴 뒤 '데이터 갱신' 하고 다시 실행하십시오")
         return out
 
-    best = candidates[0]
-    turn = best["turn_deg"]
-    rounded = int(round(abs(turn) / ROTATE_ROUND_DEG) * ROTATE_ROUND_DEG)
-    way = "반시계" if turn > 0 else "시계"
-    where = "%.1fm 거리" % best["wall"]["distance_m"]
-
-    if abs(turn) <= half:
-        # 이미 시야 안인데 면으로 안 잡혔다 = 너무 멀거나 비스듬해 점이 부족한 경우
-        out["level"] = "weak"
-        out["text"] = ("벽이 시야 방향(%s)에 있지만 면으로 잡히지 않음 — 더 가까이(%s) 두거나 "
-                       "정면으로 보게 하십시오" % (way, where))
-        out["turn_deg"] = 0
-        return out
-
-    if len(distinct) == 1:
-        out["level"] = "one_wall"
-        out["text"] = ("벽 하나만 보임 — 그 벽에 평행한 축은 제외됩니다. "
-                       "로봇을 %s %d도 회전해 두 번째 방향 벽(%s)을 시야에 넣거나, "
-                       "시야에 박스를 하나 놓으십시오" % (way, rounded, where))
-    else:
-        out["level"] = "no_wall"
-        out["text"] = ("이 카메라 시야에 벽이 없음 — 로봇을 %s %d도 회전하면 벽(%s)이 시야에 들어옵니다. "
-                       "회전 후 '데이터 갱신' 하고 자동 정렬을 다시 실행하십시오" % (way, rounded, where))
+    turn = signed_delta_deg(cam_az, target["position_az_deg"])
+    way, rounded = turn_words(turn)
     out["turn_deg"] = int(round(turn / ROTATE_ROUND_DEG) * ROTATE_ROUND_DEG)
+    out["target"] = {"kind": kind, "azimuth_deg": round(target["position_az_deg"], 1),
+                     "distance_m": round(target["distance_m"], 2)}
+
+    where = "구석" if kind == "corner" else "벽"
+    aim = ("" if rounded == 0 else "로봇을 %s %d도 회전해 " % (way, rounded))
+    now = "현재 거리 %.1fm" % target["distance_m"]
+
+    # 내림각이 커서 벽 밑동만 보이는 카메라는 접근 거리를 반드시 지켜야 한다.
+    if reach is not None:
+        need_closer = target["distance_m"] > reach
+        out["level"] = "approach" if need_closer else ("one_wall" if distinct else "no_wall")
+        out["text"] = (
+            "내림각 %.0f도라 벽 밑동만 시야에 들어옵니다 — %s 이내로 접근해야 벽이 잡힙니다 (%s). "
+            "%s%s을 정면으로 보게 하십시오. %s이면 직각인 두 벽이 함께 들어와 x, y, rot_z 가 한 번에 구속됩니다"
+            % (-cam_elev, "%.1fm" % reach, now, aim, where, where))
+        return out
+
+    if abs(turn) <= CAM_HFOV_DEG / 2.0 and distinct:
+        out["level"] = "weak"
+        out["text"] = ("벽이 시야 안(%s, %s)에 있으나 두 번째 방향 면이 잡히지 않습니다 — "
+                       "%s쪽으로 더 가까이 붙거나 정면으로 보게 하십시오" % (where, now, where))
+        return out
+
+    out["level"] = "one_wall" if distinct else "no_wall"
+    head = ("벽 하나만 보임 — 그 벽에 평행한 축은 제외됩니다. "
+            if distinct else "이 카메라 시야에 벽이 없습니다. ")
+    out["text"] = (head + "%s%s(%s)을 시야에 넣고 '데이터 갱신' 후 다시 실행하십시오%s"
+                   % (aim, where, now,
+                      " — 구석이면 세 축이 한 번에 구속됩니다" if kind == "corner" else ""))
     return out
 
 
 def scene_summary(results):
     """전체 요약. 한 자세에서 모든 카메라를 만족시킬 수 없는 경우를 안내한다."""
-    need = [r for r in results
-            if r.get("advice", {}).get("level") in
-            ("no_wall", "one_wall", "weak", "blocked", "floor_facing")]
+    need = [r for r in results if r.get("advice", {}).get("level", "ok") != "ok"]
     ok = [r["key"] for r in results if r.get("advice", {}).get("level") == "ok"]
     if not need:
         return {"text": "모든 카메라가 서로 다른 방향의 벽을 2개 이상 보고 있습니다 — x, y, rot_z 판정 가능",
                 "ready": True}
 
-    turns = [(abs(r["advice"]["turn_deg"]), r["advice"]["turn_deg"], r["key"])
-             for r in need if r.get("advice", {}).get("turn_deg")]
-    turns.sort()
     lines = []
     if ok:
         lines.append("벽을 충분히 보는 카메라: %s" % ", ".join(ok))
     lines.append("장면이 부족한 카메라: %s" % ", ".join(r["key"] for r in need))
+
+    # 접근 거리가 필요한 카메라를 먼저 알린다. 회전만으로는 해결되지 않기 때문이다.
+    approach = [r for r in need if r["advice"].get("max_wall_distance_m")]
+    if approach:
+        worst = min(approach, key=lambda r: r["advice"]["max_wall_distance_m"])
+        lines.append("%s 는 내림각이 커서 벽에서 %.1fm 이내로 접근해야 합니다"
+                     % (worst["key"], worst["advice"]["max_wall_distance_m"]))
+
+    turns = sorted((abs(r["advice"]["turn_deg"]), r["advice"]["turn_deg"], r["key"])
+                   for r in need if r["advice"].get("turn_deg"))
     if turns:
         _, turn, key = turns[0]
         way = "반시계" if turn > 0 else "시계"
         lines.append("가장 적은 회전으로 해결되는 것은 %s — 로봇을 %s %d도 회전"
                      % (key, way, abs(turn)))
-    lines.append("한 자세에서 5대를 모두 만족시키기 어렵습니다. 회전 → 데이터 갱신 → 자동 정렬 → 저장을 "
-                 "반복하면 됩니다. 매 회차에 조건을 만족한 카메라만 값이 바뀌고 나머지는 유지되므로, "
-                 "여러 자세를 거치며 결과가 누적됩니다.")
+
+    lines.append("구석을 노리십시오. 직각인 두 벽이 한 시야에 들어오면 x, y, rot_z 가 한 번에 구속됩니다. "
+                 "한 자세에서 5대를 모두 만족시키기는 어려우므로, 이동·회전 → 데이터 갱신 → 자동 정렬을 "
+                 "반복하면 됩니다. 조건을 만족한 카메라만 값이 바뀌고 나머지는 유지되므로 결과가 누적됩니다.")
     return {"text": " / ".join(lines), "ready": False}
 
 
@@ -667,6 +739,7 @@ def align_camera(cam, lidar_base):
         "vertical_planes": vertical_plane_clusters(cam_base),
         "camera_azimuth_deg": round(cam_az, 1),
         "camera_elevation_deg": round(cam_elev, 1),
+        "camera_height_m": float(t_cur[2]),
     }
     return out
 
@@ -703,12 +776,14 @@ def main():
     # 라이다는 360도를 보므로 주변 벽의 위치를 알려준다. 카메라 시야 방위와 비교해
     # "어느 방향으로 얼마나 회전하면 이 카메라가 벽을 보는지" 를 계산한다.
     lidar_walls = vertical_plane_clusters(lidar_base, voxel=0.05, min_pts=120)
+    corners = find_corners(lidar_walls)
     for r in results:
         scene = r.get("scene")
         if scene:
             r["advice"] = wall_guidance(scene["vertical_planes"],
                                         scene["camera_azimuth_deg"],
-                                        scene["camera_elevation_deg"], lidar_walls)
+                                        scene["camera_elevation_deg"],
+                                        scene["camera_height_m"], lidar_walls, corners)
 
     print(json.dumps({
         "results": results,
@@ -716,6 +791,9 @@ def main():
                          "position_az_deg": round(w["position_az_deg"], 1),
                          "distance_m": round(w["distance_m"], 2),
                          "points": w["points"]} for w in lidar_walls],
+        "corners": [{"azimuth_deg": round(c["position_az_deg"], 1),
+                     "distance_m": round(c["distance_m"], 2),
+                     "angle_deg": round(c["angle_deg"], 1)} for c in corners],
         "guidance": scene_summary(results),
     }, ensure_ascii=False), flush=True)
     return 0
