@@ -1,0 +1,9 @@
+# 로그 파일
+*.log
+
+# 캘리브레이션 실행 시 자동 생성되는 URDF 스냅샷
+urdf/ranger_new_calib_*.urdf
+
+# 파이썬 캐시
+__pycache__/
+*.py[cod]

@@ -1,0 +1,116 @@
+<!-- Update: 2026-08-20 recalib(loc4): fdown/rear=floor z0, front/right/left=shared-plane BA, lidar x -->
+<!-- Update: 2026-09-07 floor-plane recalib(claude): all 5 RGBD roll/pitch refit so base_link-frame floor plane has zero slope in x and y (per-camera Newton step on live point cloud, robot parked on flat ground); xyz/yaw unchanged -->
+<!-- Update: 2026-09-15 floor-plane recalib: 5 RGBD roll/pitch 재피팅 (yaw 고정, xyz 불변). 09-07 보정이 남긴 잔여 지면 기울기 front 2.63deg, left 2.40deg, rear 0.99deg, right 0.93deg, fdown 0.57deg 해소 -->
+<!-- Update: 2026-09-15 front RGBD z 보정 0.88 -> 0.7974 (기울기 보정 후 드러난 지면 offset +0.083 m 제거; roll/pitch/yaw 및 타 카메라 불변) -->
+<!-- Update: 2026-09-15 front RGBD x 보정 0.3111 -> 0.2611. 라이다 기준 전방 벽 정합에서 front 가 정면으로 보는 영역 전체가 +50mm 일정 offset(위치오차 성격, 기울기 아님)으로 나와 그만큼 당김. 실측 미검증 -->
+<!-- urdf -->
+<robot name="ranger">
+    <link name="base_link"/>
+    <link name="laser1"/>
+    <link name="laser_front"/>
+    <link name="laser_fdown"/>
+    <link name="laser_right"/>
+    <link name="laser_left"/>
+    <link name="laser_rear"/>
+    <link name="camera_frontRGBD_link"/>
+    <link name="camera_fdownRGBD_link"/>
+    <link name="camera_rightRGBD_link"/>
+    <link name="camera_rearRGBD_link"/>
+    <link name="camera_leftRGBD_link"/>
+    <link name="camera1"/>
+    <link name="camera2"/>
+    <link name="rslidar"/>
+    <link name="laser_multi"/>
+
+    <joint name="robot2laser1" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser1"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser3" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_front"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser4" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_fdown"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser5" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_right"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser6" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_left"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser7" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_rear"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+
+    <joint name="robot2camera_front" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_frontRGBD_link"/>
+        <origin xyz="0.3542 0.0300 0.7974" rpy="-0.013596 0.007589 -0.028180"/>
+    </joint>
+
+    <joint name="robot2camera_front_down" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_fdownRGBD_link"/>
+        <origin xyz="0.3540 0.0000 0.7428" rpy="-0.028672 0.969855 -0.041668"/>
+    </joint>
+
+    <joint name="robot2camera_right" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_rightRGBD_link"/>
+        <origin xyz="0.3710 -0.3125 0.8117" rpy="-0.023795 0.349370 -1.295040"/>
+    </joint>
+
+    <joint name="robot2camera_back" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_rearRGBD_link"/>
+        <origin xyz="-0.3787 0.0000 0.8030" rpy="-0.000717 0.870372 3.141441"/>
+    </joint>
+
+    <joint name="robot2camera_left" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_leftRGBD_link"/>
+        <origin xyz="0.2595 0.2500 0.8151" rpy="0.013445 0.362917 1.236117"/>
+    </joint>
+
+    <joint name="robot2camera_back_top" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera1"/>
+        <origin xyz="-0.375 0.000 0.800" rpy="0 0 3.141593"/>
+    </joint>
+
+    <joint name="robot2camera_top" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera2"/>
+        <origin xyz="0.300 0.000 0.800" rpy="0 0.872665 3.141593"/>
+    </joint>
+
+    <joint name="robot2lidar_3d" type="fixed">
+        <parent link="base_link"/>
+        <child link="rslidar"/>
+        <origin xyz="0.2044 -0.0400 0.9100" rpy="0.000000 -0.000000 -0.0174533"/>
+    </joint>
+    <joint name="robot2laser_multi" type="fixed">
+        <parent link="base_link" />
+        <child link="laser_multi" />
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+
+
+</robot>

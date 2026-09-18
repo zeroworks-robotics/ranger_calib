@@ -1,0 +1,112 @@
+<!-- Update: 2026-08-20 recalib(loc4): fdown/rear=floor z0, front/right/left=shared-plane BA, lidar x -->
+<!-- urdf -->
+<robot name="ranger">
+    <link name="base_link"/>
+    <link name="laser1"/>
+    <link name="laser_front"/>
+    <link name="laser_fdown"/>
+    <link name="laser_right"/>
+    <link name="laser_left"/>
+    <link name="laser_rear"/>
+    <link name="camera_frontRGBD_link"/>
+    <link name="camera_fdownRGBD_link"/>
+    <link name="camera_rightRGBD_link"/>
+    <link name="camera_rearRGBD_link"/>
+    <link name="camera_leftRGBD_link"/>
+    <link name="camera1"/>
+    <link name="camera2"/>
+    <link name="rslidar"/>
+    <link name="laser_multi"/>
+
+    <joint name="robot2laser1" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser1"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser3" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_front"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser4" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_fdown"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser5" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_right"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser6" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_left"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser7" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_rear"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+
+    <joint name="robot2camera_front" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_frontRGBD_link"/>
+        <origin xyz="0.3451 0.0362 0.7900" rpy="0.012811 0.015424 -0.028180"/>
+    </joint>
+
+    <joint name="robot2camera_front_down" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_fdownRGBD_link"/>
+        <origin xyz="0.3460 0.0000 0.7363" rpy="-0.008113 0.933787 -0.027162"/>
+    </joint>
+
+    <joint name="robot2camera_right" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_rightRGBD_link"/>
+        <origin xyz="0.3315 -0.1971 0.7951" rpy="-0.009107 0.325760 -1.279971"/>
+    </joint>
+
+    <joint name="robot2camera_back" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_rearRGBD_link"/>
+        <origin xyz="-0.3537 0.0000 0.8114" rpy="-0.016513 0.876080 3.108850"/>
+    </joint>
+
+    <joint name="robot2camera_left" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_leftRGBD_link"/>
+        <origin xyz="0.2483 0.2575 0.8057" rpy="0.018542 0.330547 1.233067"/>
+    </joint>
+
+    <joint name="robot2camera_back_top" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera1"/>
+        <origin xyz="-0.375 0.000 0.800" rpy="0 0 3.141593"/>
+    </joint>
+
+    <joint name="robot2camera_top" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera2"/>
+        <origin xyz="0.300 0.000 0.800" rpy="0 0.872665 3.141593"/>
+    </joint>
+
+    <joint name="robot2lidar_3d" type="fixed">
+        <parent link="base_link"/>
+        <child link="rslidar"/>
+        <origin xyz="0.2044 -0.0400 0.9100" rpy="0.000000 -0.000000 -0.0174533"/>
+    </joint>
+    <joint name="robot2laser_multi" type="fixed">
+        <parent link="base_link" />
+        <child link="laser_multi" />
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+
+
+</robot>

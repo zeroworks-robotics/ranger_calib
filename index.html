@@ -1,0 +1,948 @@
+<meta charset="UTF-8">
+<title>Ranger Extrinsic Rig</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#f3f5f8;
+    --surface:#ffffff;
+    --surface-2:#eaeef3;
+    --border:#d7dce3;
+    --text:#161b22;
+    --text-dim:#5c6673;
+    --accent:#c05f05;
+    --accent-soft:rgba(192,95,5,0.12);
+    --accent-fg:#ffffff;
+    --danger:#c0261f;
+    --danger-soft:rgba(192,38,31,0.12);
+    --danger-fg:#ffffff;
+    --good:#1a8a5f;
+    --c-lidar:#4b5563;
+    --c-front:#e0335a;
+    --c-fdown:#c98a00;
+    --c-right:#1f9e8a;
+    --c-rear:#3866e0;
+    --c-left:#9349d1;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0b0e13;
+      --surface:#12161d;
+      --surface-2:#1a2029;
+      --border:#262d38;
+      --text:#e6e9ef;
+      --text-dim:#8b93a3;
+      --accent:#ff9f1c;
+      --accent-soft:rgba(255,159,28,0.16);
+      --accent-fg:#0b0e13;
+      --danger:#ff6b6b;
+      --danger-soft:rgba(255,107,107,0.16);
+      --danger-fg:#160b0b;
+      --good:#39d98a;
+      --c-lidar:#9aa4b2;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0b0e13;
+    --surface:#12161d;
+    --surface-2:#1a2029;
+    --border:#262d38;
+    --text:#e6e9ef;
+    --text-dim:#8b93a3;
+    --accent:#ff9f1c;
+    --accent-soft:rgba(255,159,28,0.16);
+    --accent-fg:#0b0e13;
+    --danger:#ff6b6b;
+    --danger-soft:rgba(255,107,107,0.16);
+    --danger-fg:#160b0b;
+    --good:#39d98a;
+    --c-lidar:#9aa4b2;
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--sans);
+    height:100vh; overflow:hidden;
+    display:flex; flex-direction:column;
+  }
+  h1,h2,h3{text-wrap:balance; margin:0;}
+
+  #topbar{
+    display:flex; align-items:baseline; gap:14px;
+    padding:12px 18px; border-bottom:1px solid var(--border);
+    background:var(--surface); flex:0 0 auto; flex-wrap:wrap; row-gap:4px;
+  }
+  #topbar h1{font-size:16px; font-weight:600; letter-spacing:.2px;}
+  #topbar .sub{font-size:12.5px; color:var(--text-dim); font-family:var(--mono);}
+  #topbar .spacer{flex:1;}
+  #topbar .src{font-size:11px; color:var(--text-dim); font-family:var(--mono);}
+
+  #main{flex:1; display:flex; min-height:0;}
+  #viewport-wrap{flex:1; position:relative; min-width:0;}
+  #viewport-wrap canvas{display:block; width:100%; height:100%;}
+
+  #legend{
+    position:absolute; top:12px; left:12px; z-index:5;
+    background:color-mix(in srgb, var(--surface) 88%, transparent);
+    border:1px solid var(--border); border-radius:8px;
+    padding:8px 10px; display:flex; flex-direction:column; gap:5px;
+    backdrop-filter: blur(6px);
+  }
+  .leg-row{display:flex; align-items:center; gap:7px; font-size:12px; cursor:pointer; user-select:none;}
+  .leg-swatch{width:10px; height:10px; border-radius:2px; flex:0 0 auto;}
+  .leg-row.off{opacity:.35;}
+  .leg-row input{display:none;}
+  .leg-row.selectable:hover{color:var(--accent);}
+  .leg-row.active{color:var(--accent); font-weight:600;}
+
+  #viewbtns{
+    position:absolute; bottom:12px; left:12px; z-index:5;
+    display:flex; gap:6px;
+  }
+  #hint{
+    position:absolute; bottom:12px; right:12px; z-index:5;
+    font-size:11px; color:var(--text-dim); font-family:var(--mono);
+    background:color-mix(in srgb, var(--surface) 80%, transparent);
+    padding:5px 9px; border-radius:6px; border:1px solid var(--border);
+  }
+  #modebar{
+    position:absolute; top:12px; right:12px; z-index:5;
+    display:flex; gap:6px;
+  }
+
+  button{
+    font-family:var(--sans); font-size:12px; font-weight:500;
+    background:var(--surface-2); color:var(--text);
+    border:1px solid var(--border); border-radius:6px;
+    padding:6px 10px; cursor:pointer;
+  }
+  button:hover{border-color:var(--accent);}
+  button.active{background:var(--accent-soft); border-color:var(--accent); color:var(--accent);}
+  button:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+
+  #panel{
+    width:308px; flex:0 0 auto; background:var(--surface);
+    border-left:1px solid var(--border);
+    padding:16px; overflow-y:auto;
+    display:flex; flex-direction:column; gap:16px;
+  }
+  #camtabs{display:flex; flex-wrap:wrap; gap:6px;}
+  .camtab{
+    display:flex; align-items:center; gap:6px;
+    padding:6px 9px; border-radius:6px; border:1px solid var(--border);
+    background:var(--surface-2); font-size:12px; cursor:pointer;
+  }
+  .camtab .dot{width:8px; height:8px; border-radius:50%;}
+  .camtab.sel{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600;}
+
+  .field-group{display:flex; flex-direction:column; gap:8px;}
+  .fg-label{font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); font-weight:600;}
+  .row3{display:grid; grid-template-columns:repeat(3,1fr); gap:6px;}
+  .num-field{display:flex; flex-direction:column; gap:3px;}
+  .num-field label{font-size:10.5px; color:var(--text-dim); font-family:var(--mono);}
+  .num-field input{
+    font-family:var(--mono); font-size:12.5px; font-variant-numeric:tabular-nums;
+    background:var(--surface-2); border:1px solid var(--border); border-radius:5px;
+    color:var(--text); padding:5px 6px; width:100%;
+  }
+  .num-field.changed input{border-color:var(--accent); background:var(--accent-soft);}
+  .delta{font-size:10px; font-family:var(--mono); color:var(--accent); min-height:12px;}
+
+  #urdfbox{
+    font-family:var(--mono); font-size:11.5px; line-height:1.5;
+    background:var(--surface-2); border:1px solid var(--border); border-radius:6px;
+    padding:9px 10px; white-space:pre-wrap; word-break:break-all; color:var(--text);
+  }
+  #urdfbox .tag{color:var(--text-dim);}
+  #urdfbox .attr{color:var(--accent);}
+
+  .btnrow{display:flex; gap:6px;}
+  .btnrow button{flex:1;}
+
+  /* 저장(안전) = 강조 / 불러오기(파괴적) = 경고 윤곽 */
+  button.btn-primary{
+    background:var(--accent); border-color:var(--accent); color:var(--accent-fg);
+    font-weight:600; padding:9px 10px;
+  }
+  button.btn-primary:hover{filter:brightness(1.1);}
+  button:disabled{cursor:not-allowed; opacity:.5;}
+  button:disabled:hover{border-color:var(--border); filter:none;}
+  button.btn-primary:disabled{
+    background:var(--surface-2); color:var(--text-dim); border-color:var(--border);
+  }
+  button.btn-danger{
+    background:transparent; border-color:var(--danger); color:var(--danger);
+    border-style:dashed;
+  }
+  button.btn-danger:hover{background:var(--danger-soft); border-color:var(--danger);}
+  button.btn-danger.armed{
+    background:var(--danger); border-color:var(--danger); color:var(--danger-fg);
+    border-style:solid; font-weight:600;
+    animation:armpulse .9s ease-in-out infinite alternate;
+  }
+  @keyframes armpulse{from{opacity:1;} to{opacity:.72;}}
+  @media (prefers-reduced-motion:reduce){ button.btn-danger.armed{animation:none;} }
+
+  .danger-zone{
+    border:1px solid var(--border); border-left:3px solid var(--danger);
+    border-radius:6px; padding:10px; display:flex; flex-direction:column; gap:7px;
+  }
+  .fg-label .step{
+    display:inline-block; background:var(--surface-2); border:1px solid var(--border);
+    border-radius:3px; padding:0 4px; margin-right:5px; color:var(--text-dim);
+  }
+
+  #ptsize{width:100%;}
+  .mini{font-size:11px; color:var(--text-dim); line-height:1.5;}
+  .mini b{color:var(--text);}
+  .mini code{font-family:var(--mono); font-size:10.5px; background:var(--surface-2); padding:1px 4px; border-radius:3px;}
+  hr.sep{border:none; border-top:1px solid var(--border); margin:0;}
+
+  ::-webkit-scrollbar{width:9px;}
+  ::-webkit-scrollbar-thumb{background:var(--border); border-radius:5px;}
+
+  @media (max-width:760px){
+    #main{flex-direction:column;}
+    #viewport-wrap{flex:0 0 52vh;}
+    #panel{width:100%; border-left:none; border-top:1px solid var(--border); flex:1;}
+  }
+</style>
+
+<div id="topbar">
+  <h1>Ranger Extrinsic Rig</h1>
+  <span class="sub">base_link 기준 · rslidar 고정 참조</span>
+  <div class="spacer"></div>
+  <span class="src">cona@192.168.10.106 · 2026-09-15 18:55 스냅샷 (ranger_new.urdf, 실시간 편집 미반영)</span>
+</div>
+
+<div id="main">
+  <div id="viewport-wrap">
+    <div id="legend"></div>
+    <div id="modebar">
+      <button id="mode-translate" class="active" title="이동 (G)">이동</button>
+      <button id="mode-rotate" title="회전 (R)">회전</button>
+    </div>
+    <div id="viewbtns">
+      <button data-view="iso">Iso</button>
+      <button data-view="top">Top</button>
+      <button data-view="front">Front</button>
+      <button data-view="side">Side</button>
+    </div>
+    <div id="hint">좌드래그 회전 · 우드래그 이동 · 휠 줌</div>
+  </div>
+
+  <div id="panel">
+    <div class="field-group">
+      <div class="fg-label"><span class="step">1</span>기준 원본 — 작업 시작 전에만</div>
+      <div class="danger-zone">
+        <button id="btn-load-latest" class="btn-danger">최신 URDF 불러오기</button>
+        <div class="mini" id="urdf-base-status">기준 원본: 2026-09-15 18:55 스냅샷 (아직 최신 불러오기 안 함)</div>
+        <div class="mini">로봇의 실사용 URDF를 지금 그 자리에서 읽어와 화면과 기준값을 갱신합니다. <b>지금 화면의 조정값은 전부 버려집니다 (되돌리기 불가).</b> 조정 중이면 두 번 눌러야 실행됩니다.</div>
+      </div>
+    </div>
+
+    <hr class="sep">
+
+    <div class="field-group">
+      <div class="fg-label"><span class="step">2</span>카메라 선택</div>
+      <div id="camtabs"></div>
+    </div>
+
+    <hr class="sep">
+
+    <div class="field-group">
+      <div class="fg-label">위치 (m)</div>
+      <div class="row3" id="pos-fields"></div>
+    </div>
+
+    <div class="field-group">
+      <div class="fg-label">회전 R/P/Y (deg)</div>
+      <div class="row3" id="rot-fields"></div>
+    </div>
+
+    <div class="btnrow">
+      <button id="btn-reset-one">이 카메라 초기화</button>
+      <button id="btn-reset-all">전체 초기화</button>
+    </div>
+
+    <hr class="sep">
+
+    <div class="field-group">
+      <div class="fg-label"><span class="step">3</span>URDF &lt;origin&gt; 저장</div>
+      <div id="urdfbox"></div>
+      <div class="btnrow">
+        <button id="btn-copy">현재 origin 복사</button>
+      </div>
+      <button id="btn-make-urdf" class="btn-primary" disabled>URDF 만들기 — 새 파일로 저장</button>
+      <div class="mini" id="urdf-save-status">잠김 — ①에서 "최신 URDF 불러오기"를 먼저 눌러야 저장할 수 있습니다</div>
+      <div class="mini">지금 조정값을 기준 원본 위에 반영해 <code>ranger_calib/urdf/</code> 밑에 <b>새 파일</b>로 저장합니다 — 원본은 절대 안 건드리므로 여러 번 눌러도 안전합니다. <b>①의 불러오기를 하지 않으면 저장할 수 없습니다</b> — 화면에 내장된 예비 URDF를 기준으로 저장하면 실파일에만 있는 내용(초음파 링크 등)이 사라지기 때문입니다.</div>
+    </div>
+
+    <hr class="sep">
+
+    <div class="field-group">
+      <div class="fg-label">포인트 크기</div>
+      <input type="range" id="ptsize" min="1" max="6" step="0.5" value="2">
+      <div class="mini">라이다 포인트클라우드는 고정 기준(회색)이며 드래그되지 않습니다. 5개 RGBD 카메라만 선택 후 조정할 수 있습니다.</div>
+    </div>
+
+    <hr class="sep">
+
+    <div class="field-group">
+      <div class="fg-label">스냅샷</div>
+      <button id="btn-refresh-data">데이터 갱신</button>
+      <div class="mini" id="refresh-status-live">아직 갱신 안 함</div>
+      <div class="mini">누를 때마다 로봇에서 6개 센서 프레임을 새로 한 번 캡처합니다 (카메라 위치/회전 조정값은 유지됨). claude.ai에 올라간 버전에서는 로봇 네트워크에 닿을 수 없어 동작하지 않습니다 — 로봇에서 직접 연 페이지(http://192.168.10.106:8080)에서만 갱신됩니다.</div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js"></script>
+<script>
+(function(){
+
+// ---------- calibration constants captured from the live robot (2026-09-15 18:55 KST) ----------
+// base_link -> camera_*RGBD_link  (this IS the URDF <origin> the user edits)
+const CAMERAS = [
+  { key:"front", label:"Front", color:0xe0335a, file:"data/camera_frontRGBD_depth_points.json",
+    pos:[0.2611,0.0300,0.7974], quat:[-0.006743762553707386,0.003889805799523276,-0.01406331461760952,0.9998707987832364],
+    mountT:[-9.779740124940873e-05,-0.02371392822265625,2.462081238627434e-05],
+    mountQ1:[-0.01000938005745411,0.0005331067950464785,-0.0009291898459196091,0.9999493360519409] },
+  { key:"fdown", label:"Front-down", color:0xc98a00, file:"data/camera_fdownRGBD_depth_points.json",
+    pos:[0.3500,0.0000,0.7363], quat:[-0.0060217661956104285,0.46538039256457825,0.003166264353902759,0.8850846305966259],
+    mountT:[-4.8561438918113705e-05,-0.02367654800415039,2.4497168487869204e-07],
+    mountQ1:[-7.870991976233197e-05,0.0006962809711694717,-0.0009993339190259576,0.9999992251396179] },
+  { key:"right", label:"Right", color:0x1f9e8a, file:"data/camera_rightRGBD_depth_points.json",
+    pos:[0.3700,-0.3100,0.7969], quat:[0.09133497196305267,0.15365145786268297,-0.5922158882859722,0.785703184449979],
+    mountT:[-0.00022346094250679015,-0.02374190902709961,-3.37345190346241e-05],
+    mountQ1:[-0.0009250045404769479,-0.0003994066792074591,-0.0007557311910204589,0.9999991655349731] },
+  { key:"rear", label:"Rear", color:0x3866e0, file:"data/camera_rearRGBD_depth_points.json",
+    pos:[-0.3750,0.0000,0.8031], quat:[-0.42810008097392355,0.0014115532313961527,0.9037299824874453,0.0006685363392899145],
+    mountT:[-4.334266856312752e-05,-0.023651601791381836,0.00019344501197338104],
+    mountQ1:[-0.0004182728589512407,0.0003578486212063581,-0.0011615053517743945,0.9999991655349731] },
+  { key:"left", label:"Left", color:0x9349d1, file:"data/camera_leftRGBD_depth_points.json",
+    pos:[0.2595,0.2500,0.8151], quat:[-0.09917951831005846,0.1509073928234603,0.5689385640351043,0.8023087262972304],
+    mountT:[-0.00021033471822738648,-0.02378948974609375,2.450743317604065e-05],
+    mountQ1:[-0.0010201487457379699,0.0017835049657151103,-0.0004966250853613019,0.9999977350234985] },
+];
+const MOUNT_Q2 = [-0.5,0.4999999999999999,-0.5,0.5000000000000001]; // color_frame -> color_optical_frame (identical for all 5)
+const LIDAR = { pos:[0.2044,-0.0400,0.9100], quat:[0.0,0.0,-0.00872653923825988,0.9999619230315339], file:"data/rslidar_points.json", color:0x9aa4b2 };
+
+const CHILD_LINK = { front:"camera_frontRGBD_link", fdown:"camera_fdownRGBD_link", right:"camera_rightRGBD_link", rear:"camera_rearRGBD_link", left:"camera_leftRGBD_link" };
+const ORIGINAL_URDF = `<!-- Update: 2026-08-20 recalib(loc4): fdown/rear=floor z0, front/right/left=shared-plane BA, lidar x -->
+<!-- Update: 2026-09-07 floor-plane recalib(claude): all 5 RGBD roll/pitch refit so base_link-frame floor plane has zero slope in x and y (per-camera Newton step on live point cloud, robot parked on flat ground); xyz/yaw unchanged -->
+<!-- Update: 2026-09-15 floor-plane recalib: 5 RGBD roll/pitch \uC7AC\uD53C\uD305 (yaw \uACE0\uC815, xyz \uBD88\uBCC0). 09-07 \uBCF4\uC815\uC774 \uB0A8\uAE34 \uC794\uC5EC \uC9C0\uBA74 \uAE30\uC6B8\uAE30 front 2.63deg, left 2.40deg, rear 0.99deg, right 0.93deg, fdown 0.57deg \uD574\uC18C -->
+<!-- Update: 2026-09-15 front RGBD z \uBCF4\uC815 0.88 -> 0.7974 (\uAE30\uC6B8\uAE30 \uBCF4\uC815 \uD6C4 \uB4DC\uB7EC\uB09C \uC9C0\uBA74 offset +0.083 m \uC81C\uAC70; roll/pitch/yaw \uBC0F \uD0C0 \uCE74\uBA54\uB77C \uBD88\uBCC0) -->
+<!-- Update: 2026-09-15 front RGBD x \uBCF4\uC815 0.3111 -> 0.2611. \uB77C\uC774\uB2E4 \uAE30\uC900 \uC804\uBC29 \uBCBD \uC815\uD569\uC5D0\uC11C front \uAC00 \uC815\uBA74\uC73C\uB85C \uBCF4\uB294 \uC601\uC5ED \uC804\uCCB4\uAC00 +50mm \uC77C\uC815 offset(\uC704\uCE58\uC624\uCC28 \uC131\uACA9, \uAE30\uC6B8\uAE30 \uC544\uB2D8)\uC73C\uB85C \uB098\uC640 \uADF8\uB9CC\uD07C \uB2F9\uAE40. \uC2E4\uCE21 \uBBF8\uAC80\uC99D -->
+<!-- urdf -->
+<robot name="ranger">
+    <link name="base_link"/>
+    <link name="laser1"/>
+    <link name="laser_front"/>
+    <link name="laser_fdown"/>
+    <link name="laser_right"/>
+    <link name="laser_left"/>
+    <link name="laser_rear"/>
+    <link name="camera_frontRGBD_link"/>
+    <link name="camera_fdownRGBD_link"/>
+    <link name="camera_rightRGBD_link"/>
+    <link name="camera_rearRGBD_link"/>
+    <link name="camera_leftRGBD_link"/>
+    <link name="camera1"/>
+    <link name="camera2"/>
+    <link name="rslidar"/>
+    <link name="laser_multi"/>
+
+    <joint name="robot2laser1" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser1"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser3" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_front"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser4" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_fdown"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser5" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_right"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser6" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_left"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <joint name="robot2laser7" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_rear"/>
+        <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+
+    <joint name="robot2camera_front" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_frontRGBD_link"/>
+        <origin xyz="0.2611 0.0300 0.7974" rpy="-0.013596 0.007589 -0.02818"/>
+    </joint>
+
+    <joint name="robot2camera_front_down" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_fdownRGBD_link"/>
+        <origin xyz="0.3500 0.0000 0.7363" rpy="-0.013607 0.968153 0.000000"/>
+    </joint>
+
+    <joint name="robot2camera_right" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_rightRGBD_link"/>
+        <origin xyz="0.37 -0.31 0.7969" rpy="-0.041068 0.357175 -1.299195"/>
+    </joint>
+
+    <joint name="robot2camera_back" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_rearRGBD_link"/>
+        <origin xyz="-0.3750 0.0000 0.8031" rpy="0.003124 0.884780 3.141593"/>
+    </joint>
+
+    <joint name="robot2camera_left" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_leftRGBD_link"/>
+        <origin xyz="0.2595 0.250 0.8151" rpy="0.013445 0.362917 1.236117"/>
+    </joint>
+
+    <joint name="robot2camera_back_top" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera1"/>
+        <origin xyz="-0.375 0.000 0.800" rpy="0 0 3.141593"/>
+    </joint>
+
+    <joint name="robot2camera_top" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera2"/>
+        <origin xyz="0.300 0.000 0.800" rpy="0 0.872665 3.141593"/>
+    </joint>
+
+    <joint name="robot2lidar_3d" type="fixed">
+        <parent link="base_link"/>
+        <child link="rslidar"/>
+        <origin xyz="0.2044 -0.0400 0.9100" rpy="0.000000 -0.000000 -0.0174533"/>
+    </joint>
+    <joint name="robot2laser_multi" type="fixed">
+        <parent link="base_link" />
+        <child link="laser_multi" />
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+
+
+</robot>
+`;
+
+function buildModifiedUrdf(){
+  // ORIGINAL_URDF(내장 9/15 스냅샷)를 저장 기준으로 쓰면 절대 안 된다.
+  // 실사용 URDF에만 있는 내용(초음파 a01_s1~s4, 최신 라이다 origin, 보정 이력 주석)이
+  // 통째로 사라진 채 저장된다. 2026-09-16 에 실제로 그렇게 실파일이 덮어써졌다.
+  // 저장 기준은 반드시 '최신 URDF 불러오기'로 읽어온 실파일이어야 한다.
+  if(!state.baseUrdf) throw new Error('기준 URDF가 없습니다 — 먼저 "최신 URDF 불러오기"를 누르세요');
+  let xml = state.baseUrdf;
+  for(const cam of CAMERAS){
+    const g = state.camObjs[cam.key].group;
+    const rpy = quatToRpy(g.quaternion);
+    const xyzStr = `${fmt(g.position.x,4)} ${fmt(g.position.y,4)} ${fmt(g.position.z,4)}`;
+    const rpyStr = `${fmt(rpy.roll,6)} ${fmt(rpy.pitch,6)} ${fmt(rpy.yaw,6)}`;
+    const link = CHILD_LINK[cam.key];
+    const re = new RegExp('(<child link="'+link+'"/>\\s*<origin xyz=")[^"]*(" rpy=")[^"]*("\\s*/>)');
+    xml = xml.replace(re, function(_, a, b, c){ return a + xyzStr + b + rpyStr + c; });
+  }
+  return xml;
+}
+
+async function loadLatestUrdf(){
+  const statusEl = document.getElementById('urdf-base-status');
+  const btn = document.getElementById('btn-load-latest');
+  btn.disabled = true;
+  try{
+    const res = await fetch('/latest_urdf?t=' + Date.now(), {cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    // 파일명은 서버가 X-Live-Urdf 로 알려준다 (기체가 바뀌면 이 값도 따라 바뀜).
+    const urdfName = res.headers.get('X-Live-Urdf') || '실사용 URDF';
+    const text = await res.text();
+    state.baseUrdf = text;
+    let syncedCount = 0;
+    for(const cam of CAMERAS){
+      const link = CHILD_LINK[cam.key];
+      const re = new RegExp('<child link="'+link+'"/>\\s*<origin xyz="([^"]+)" rpy="([^"]+)"');
+      const m = text.match(re);
+      if(!m) continue;
+      const xyz = m[1].trim().split(/\s+/).map(Number);
+      const rpy = m[2].trim().split(/\s+/).map(Number);
+      const q = rpyToQuat(rpy[0], rpy[1], rpy[2]);
+      const obj = state.camObjs[cam.key];
+      obj.group.position.set(xyz[0], xyz[1], xyz[2]);
+      obj.group.quaternion.copy(q);
+      state.original[cam.key] = { pos: xyz.slice(), quat: [q.x, q.y, q.z, q.w] };
+      syncedCount++;
+    }
+    updateReadout();
+    updateSaveGuard();   // 기준이 생겼으므로 저장 버튼 해제
+    statusEl.textContent = `기준 원본: ${urdfName} (${syncedCount}/${CAMERAS.length} 카메라 동기화, ${new Date().toLocaleTimeString('ko-KR')})`;
+  }catch(err){
+    statusEl.textContent = '최신 URDF 불러오기 실패 (로봇 로컬 서버에서만 동작) — ' + err.message;
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ---------- rpy <-> quaternion, URDF convention: R = Rz(yaw)*Ry(pitch)*Rx(roll) ----------
+function rpyToQuat(roll, pitch, yaw){
+  const cr=Math.cos(roll), sr=Math.sin(roll);
+  const cp=Math.cos(pitch), sp=Math.sin(pitch);
+  const cy=Math.cos(yaw), sy=Math.sin(yaw);
+  const m = new THREE.Matrix4();
+  m.set(
+    cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr, 0,
+    sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr, 0,
+    -sp,   cp*sr,            cp*cr,            0,
+    0,0,0,1
+  );
+  return new THREE.Quaternion().setFromRotationMatrix(m);
+}
+function quatToRpy(q){
+  const e = new THREE.Matrix4().makeRotationFromQuaternion(q).elements;
+  const R00=e[0], R10=e[1], R20=e[2], R21=e[6], R22=e[10];
+  const yaw = Math.atan2(R10, R00);
+  const pitch = Math.atan2(-R20, Math.sqrt(R00*R00+R10*R10));
+  const roll = Math.atan2(R21, R22);
+  return {roll, pitch, yaw};
+}
+const D2R = Math.PI/180, R2D = 180/Math.PI;
+
+// ---------- three.js setup (Z-up, matching ROS/base_link) ----------
+const wrap = document.getElementById('viewport-wrap');
+const scene = new THREE.Scene();
+scene.background = null;
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+camera.up.set(0,0,1);
+
+const renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
+wrap.appendChild(renderer.domElement);
+
+function isDark(){
+  const t = document.documentElement.getAttribute('data-theme');
+  if(t==='dark') return true;
+  if(t==='light') return false;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+function bgColor(){ return isDark() ? 0x0b0e13 : 0xf3f5f8; }
+function gridColor(){ return isDark() ? 0x262d38 : 0xd7dce3; }
+function axesOpacity(){ return isDark() ? 0.9 : 0.9; }
+
+let grid = new THREE.GridHelper(4, 20, gridColor(), gridColor());
+grid.rotation.x = Math.PI/2;
+scene.add(grid);
+
+const baseAxes = new THREE.AxesHelper(0.28);
+scene.add(baseAxes);
+
+const orbit = new THREE.OrbitControls(camera, renderer.domElement);
+orbit.enableDamping = true;
+orbit.dampingFactor = 0.08;
+orbit.target.set(0.1,0,0.6);
+
+const light = new THREE.AmbientLight(0xffffff, 1.0);
+scene.add(light);
+
+const transformControl = new THREE.TransformControls(camera, renderer.domElement);
+transformControl.setMode('translate');
+transformControl.addEventListener('dragging-changed', e => { orbit.enabled = !e.value; });
+transformControl.addEventListener('objectChange', () => { updateReadout(); });
+scene.add(transformControl);
+
+function resize(){
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w,h);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  camera.aspect = w/h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+
+// ---------- load a .bin (float32 xyz interleaved) as BufferGeometry ----------
+async function loadCloud(url){
+  const json = await fetch(url).then(r=>r.json());
+  const arr = new Float32Array(json);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(arr,3));
+  return geo;
+}
+
+async function refreshOne(url, points){
+  const json = await fetch(url + '?t=' + Date.now(), {cache:'no-store'}).then(r=>r.json());
+  points.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(json),3));
+  points.geometry.computeBoundingSphere();
+}
+
+// capture_once.py 출력에서 센서별 결과를 뽑는다. 응답 본문에 이미 답이 다 들어있는데
+// 예전에는 상태코드만 보고 버려서, 센서 하나가 죽어도 무엇이 죽었는지 알 수 없었다.
+function shortTopic(t){ return t.replace(/^camera_/, '').replace(/RGBD\/depth\/points$/, ''); }
+function parseCapture(text){
+  const done = text.match(/DONE (\d+)\/(\d+)/);
+  const failed = [...text.matchAll(/^RESULT (\S+): (\S+)$/gm)]
+    .filter(m => m[2] !== 'OK').map(m => m[1]);
+  // 무효점 비율이 가장 높은 카메라 = 센서 건강도 지표 (라이다는 다운샘플이라 제외)
+  let worst = null;
+  for(const m of text.matchAll(/^(\S+): (\d+) points written \(raw (\d+)\)/gm)){
+    if(!m[1].startsWith('camera_')) continue;
+    const raw = +m[3];
+    if(raw <= 0) continue;
+    const ratio = (raw - (+m[2])) / raw;
+    if(!worst || ratio > worst.ratio) worst = {name: shortTopic(m[1]), ratio};
+  }
+  return { ok: done ? done[1] : '?', total: done ? done[2] : '?', failed, worst };
+}
+
+async function refreshAllClouds(){
+  const statusEl = document.getElementById('refresh-status-live');
+  const btn = document.getElementById('btn-refresh-data');
+  btn.disabled = true;
+  const prevLabel = btn.textContent;
+  btn.textContent = '갱신 중...';
+  try{
+    if(statusEl) statusEl.textContent = '로봇에서 새 프레임 캡처 중...';
+    let trig;
+    try{
+      trig = await fetch('/refresh_snapshot', {method:'POST'});
+    }catch(netErr){
+      // 여기만이 진짜 "서버에 못 닿는" 경우. 캡처 실패와 구분해야 엉뚱한 곳을 뒤지지 않는다.
+      throw new Error('서버에 연결할 수 없습니다 (로봇에서 직접 연 페이지에서만 동작) — ' + netErr.message);
+    }
+    const cap = parseCapture(await trig.text());
+    if(!trig.ok){
+      // 성공분만 다시 읽으면 센서별로 촬영 시각이 어긋난 점군이 섞인다.
+      // 화면은 그대로 두고 어느 센서가 죽었는지만 알린다.
+      const who = cap.failed.length ? cap.failed.map(shortTopic).join(', ') : ('HTTP ' + trig.status);
+      throw new Error(`${who} 응답 없음 (${cap.ok}/${cap.total}). 화면은 이전 스냅샷 유지`);
+    }
+    await refreshOne(LIDAR.file, state.lidarPts);
+    for(const cam of CAMERAS){
+      await refreshOne(cam.file, state.camObjs[cam.key].pts);
+    }
+    let msg = `마지막 갱신: ${new Date().toLocaleTimeString('ko-KR')} (${cap.ok}/${cap.total} 센서`;
+    if(cap.worst) msg += `, 무효점 최대 ${(cap.worst.ratio*100).toFixed(1)}% ${cap.worst.name}`;
+    if(statusEl) statusEl.textContent = msg + ')';
+  }catch(err){
+    if(statusEl) statusEl.textContent = '갱신 실패 — ' + err.message;
+  }finally{
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+  }
+}
+
+const state = { selected: 'front', ptsize: 2, camObjs: {}, original: {}, baseUrdf: null, ready: false };
+
+async function init(){
+  // lidar: fixed reference, no mount chain (frame_id already == rslidar)
+  const lidarGeo = await loadCloud(LIDAR.file);
+  const lidarGroup = new THREE.Group();
+  lidarGroup.position.set(...LIDAR.pos);
+  lidarGroup.quaternion.set(...LIDAR.quat);
+  const lidarPts = new THREE.Points(lidarGeo, new THREE.PointsMaterial({color:LIDAR.color, size:2, sizeAttenuation:false}));
+  lidarGroup.add(lidarPts);
+  lidarGroup.add(new THREE.AxesHelper(0.18));
+  scene.add(lidarGroup);
+  state.lidarPts = lidarPts;
+
+  for(const cam of CAMERAS){
+    const geo = await loadCloud(cam.file);
+    const linkGroup = new THREE.Group();
+    linkGroup.position.set(...cam.pos);
+    linkGroup.quaternion.set(...cam.quat);
+    linkGroup.userData.key = cam.key;
+
+    const q1 = new THREE.Quaternion(...cam.mountQ1);
+    const q2 = new THREE.Quaternion(...MOUNT_Q2);
+    const mountQuat = q1.clone().multiply(q2);
+    const mount = new THREE.Group();
+    mount.position.set(...cam.mountT);
+    mount.quaternion.copy(mountQuat);
+
+    const pts = new THREE.Points(geo, new THREE.PointsMaterial({color:cam.color, size:2, sizeAttenuation:false}));
+    mount.add(pts);
+    linkGroup.add(mount);
+    linkGroup.add(new THREE.AxesHelper(0.14));
+    scene.add(linkGroup);
+
+    state.camObjs[cam.key] = {group:linkGroup, pts, meta:cam};
+    state.original[cam.key] = {pos:cam.pos.slice(), quat:cam.quat.slice()};
+  }
+
+  buildLegend();
+  buildCamTabs();
+  buildFieldInputs();
+  selectCamera('front');
+  state.ready = true;
+  updateSaveGuard();
+  resize();
+  animate();
+}
+
+function buildLegend(){
+  const el = document.getElementById('legend');
+  const rows = [{key:'lidar', label:'RSLiDAR (기준)', color:'#'+LIDAR.color.toString(16).padStart(6,'0'), pts:state.lidarPts}]
+    .concat(CAMERAS.map(c=>({key:c.key, label:c.label, color:'#'+c.color.toString(16).padStart(6,'0'), pts:state.camObjs[c.key].pts})));
+  el.innerHTML = '';
+  rows.forEach(r=>{
+    const row = document.createElement('label');
+    row.className = 'leg-row selectable';
+    row.innerHTML = `<input type="checkbox" checked><span class="leg-swatch" style="background:${r.color}"></span><span>${r.label}</span>`;
+    const cb = row.querySelector('input');
+    cb.addEventListener('change', ()=>{ r.pts.visible = cb.checked; row.classList.toggle('off', !cb.checked); });
+    el.appendChild(row);
+  });
+}
+
+function buildCamTabs(){
+  const el = document.getElementById('camtabs');
+  el.innerHTML = '';
+  CAMERAS.forEach(c=>{
+    const b = document.createElement('div');
+    b.className = 'camtab';
+    b.dataset.key = c.key;
+    b.innerHTML = `<span class="dot" style="background:#${c.color.toString(16).padStart(6,'0')}"></span>${c.label}`;
+    b.addEventListener('click', ()=>selectCamera(c.key));
+    el.appendChild(b);
+  });
+}
+
+function buildFieldInputs(){
+  const posWrap = document.getElementById('pos-fields');
+  const rotWrap = document.getElementById('rot-fields');
+  posWrap.innerHTML=''; rotWrap.innerHTML='';
+  ['x','y','z'].forEach(ax=>{
+    const f = document.createElement('div'); f.className='num-field'; f.dataset.axis=ax; f.dataset.group='pos';
+    f.innerHTML = `<label>${ax}</label><input type="number" step="0.001">`;
+    posWrap.appendChild(f);
+  });
+  ['roll','pitch','yaw'].forEach(ax=>{
+    const f = document.createElement('div'); f.className='num-field'; f.dataset.axis=ax; f.dataset.group='rot';
+    f.innerHTML = `<label>${ax==='roll'?'R':ax==='pitch'?'P':'Y'}</label><input type="number" step="0.05">`;
+    rotWrap.appendChild(f);
+  });
+  posWrap.querySelectorAll('input').forEach(inp=>inp.addEventListener('input', onFieldInput));
+  rotWrap.querySelectorAll('input').forEach(inp=>inp.addEventListener('input', onFieldInput));
+}
+
+function onFieldInput(){
+  const cam = state.camObjs[state.selected];
+  const px = parseFloat(document.querySelector('[data-axis="x"] input').value)||0;
+  const py = parseFloat(document.querySelector('[data-axis="y"] input').value)||0;
+  const pz = parseFloat(document.querySelector('[data-axis="z"] input').value)||0;
+  const rr = (parseFloat(document.querySelector('[data-axis="roll"] input').value)||0)*D2R;
+  const rp = (parseFloat(document.querySelector('[data-axis="pitch"] input').value)||0)*D2R;
+  const ry = (parseFloat(document.querySelector('[data-axis="yaw"] input').value)||0)*D2R;
+  cam.group.position.set(px,py,pz);
+  cam.group.quaternion.copy(rpyToQuat(rr,rp,ry));
+  updateReadout();
+}
+
+function selectCamera(key){
+  state.selected = key;
+  document.querySelectorAll('.camtab').forEach(t=>t.classList.toggle('sel', t.dataset.key===key));
+  transformControl.attach(state.camObjs[key].group);
+  updateReadout();
+}
+
+function fmt(n, d){ return n.toFixed(d); }
+
+function updateReadout(){
+  const cam = state.camObjs[state.selected];
+  const g = cam.group;
+  const rpy = quatToRpy(g.quaternion);
+  const orig = state.original[state.selected];
+  const origRpy = quatToRpy(new THREE.Quaternion(...orig.quat));
+
+  const posVals = [g.position.x, g.position.y, g.position.z];
+  const posOrig = orig.pos;
+  document.querySelectorAll('#pos-fields .num-field').forEach((f,i)=>{
+    const inp = f.querySelector('input');
+    if(document.activeElement !== inp) inp.value = fmt(posVals[i],4);
+    const d = posVals[i]-posOrig[i];
+    f.classList.toggle('changed', Math.abs(d) > 1e-4);
+  });
+  const rotVals = [rpy.roll*R2D, rpy.pitch*R2D, rpy.yaw*R2D];
+  const rotOrig = [origRpy.roll*R2D, origRpy.pitch*R2D, origRpy.yaw*R2D];
+  document.querySelectorAll('#rot-fields .num-field').forEach((f,i)=>{
+    const inp = f.querySelector('input');
+    if(document.activeElement !== inp) inp.value = fmt(rotVals[i],3);
+    const d = rotVals[i]-rotOrig[i];
+    f.classList.toggle('changed', Math.abs(d) > 0.02);
+  });
+
+  const xyzStr = `${fmt(posVals[0],4)} ${fmt(posVals[1],4)} ${fmt(posVals[2],4)}`;
+  const rpyStr = `${fmt(rpy.roll,6)} ${fmt(rpy.pitch,6)} ${fmt(rpy.yaw,6)}`;
+  document.getElementById('urdfbox').innerHTML =
+    `<span class="tag">&lt;origin</span> <span class="attr">xyz</span>="${xyzStr}" <span class="attr">rpy</span>="${rpyStr}"<span class="tag">/&gt;</span>`;
+}
+
+document.getElementById('btn-reset-one').addEventListener('click', ()=>{
+  const cam = state.camObjs[state.selected];
+  const orig = state.original[state.selected];
+  cam.group.position.set(...orig.pos);
+  cam.group.quaternion.set(...orig.quat);
+  updateReadout();
+});
+document.getElementById('btn-reset-all').addEventListener('click', ()=>{
+  Object.keys(state.camObjs).forEach(key=>{
+    const cam = state.camObjs[key];
+    const orig = state.original[key];
+    cam.group.position.set(...orig.pos);
+    cam.group.quaternion.set(...orig.quat);
+  });
+  updateReadout();
+});
+document.getElementById('btn-copy').addEventListener('click', (e)=>{
+  const text = document.getElementById('urdfbox').innerText;
+  navigator.clipboard?.writeText(text).then(()=>{
+    e.target.textContent = '복사됨';
+    setTimeout(()=>e.target.textContent='복사', 1200);
+  }).catch(()=>{});
+});
+document.getElementById('mode-translate').addEventListener('click', ()=>{
+  transformControl.setMode('translate');
+  document.getElementById('mode-translate').classList.add('active');
+  document.getElementById('mode-rotate').classList.remove('active');
+});
+document.getElementById('mode-rotate').addEventListener('click', ()=>{
+  transformControl.setMode('rotate');
+  document.getElementById('mode-rotate').classList.add('active');
+  document.getElementById('mode-translate').classList.remove('active');
+});
+window.addEventListener('keydown', (e)=>{
+  if(e.key==='g') document.getElementById('mode-translate').click();
+  if(e.key==='r') document.getElementById('mode-rotate').click();
+});
+document.getElementById('btn-refresh-data').addEventListener('click', refreshAllClouds);
+// ---------- 불러오기: 잃을 게 있을 때만 2단계 확인 (오클릭 방지) ----------
+// 저장(만들기)은 새 파일만 만들어 안전 -> 마찰 없음.
+// 불러오기는 화면 조정값을 되돌릴 수 없게 버림 -> 변경된 카메라가 있으면 두 번 눌러야 실행.
+function changedCameras(){
+  return CAMERAS.filter(cam=>{
+    const g = state.camObjs[cam.key].group;
+    const o = state.original[cam.key];
+    if(Math.abs(g.position.x-o.pos[0]) > 1e-4) return true;
+    if(Math.abs(g.position.y-o.pos[1]) > 1e-4) return true;
+    if(Math.abs(g.position.z-o.pos[2]) > 1e-4) return true;
+    return g.quaternion.angleTo(new THREE.Quaternion(...o.quat)) > 0.02*D2R;
+  }).map(c=>c.label);
+}
+
+const LOAD_LABEL = '최신 URDF 불러오기';
+let loadArmTimer = null;
+function disarmLoad(){
+  const btn = document.getElementById('btn-load-latest');
+  if(loadArmTimer !== null){ clearTimeout(loadArmTimer); loadArmTimer = null; }
+  btn.classList.remove('armed');
+  btn.textContent = LOAD_LABEL;
+}
+document.getElementById('btn-load-latest').addEventListener('click', ()=>{
+  const btn = document.getElementById('btn-load-latest');
+  if(!state.ready){ return; }   // 점군 로딩 중에는 무시 (state.camObjs 아직 비어 있음)
+
+  // 2단계: 이미 무장 상태면 실행
+  if(loadArmTimer !== null){
+    disarmLoad();
+    loadLatestUrdf();
+    return;
+  }
+
+  // 조정한 게 없으면 버릴 것도 없으므로 바로 실행
+  const changed = changedCameras();
+  if(changed.length === 0){
+    loadLatestUrdf();
+    return;
+  }
+
+  // 1단계: 무장 + 무엇을 잃는지 명시
+  btn.classList.add('armed');
+  btn.textContent = `${changed.join('·')} 조정값 버림 — 한 번 더 누르면 실행`;
+  loadArmTimer = setTimeout(disarmLoad, 4000);
+});
+// 불러오기 전에는 저장 버튼을 잠근다 (내장 스냅샷이 실파일로 나가는 사고 방지)
+function updateSaveGuard(){
+  const btn = document.getElementById('btn-make-urdf');
+  const st  = document.getElementById('urdf-save-status');
+  const ready = !!state.baseUrdf;
+  btn.disabled = !ready;
+  btn.title = ready ? '' : '먼저 ①의 "최신 URDF 불러오기"를 누르세요';
+  if(!ready && st) st.textContent = '잠김 — ①에서 "최신 URDF 불러오기"를 먼저 눌러야 저장할 수 있습니다';
+}
+
+document.getElementById('btn-make-urdf').addEventListener('click', async (e)=>{
+  const statusEl = document.getElementById('urdf-save-status');
+  if(!state.baseUrdf){   // 버튼이 어떻게든 활성화돼도 여기서 한 번 더 막는다
+    statusEl.textContent = '저장 취소 — 먼저 "최신 URDF 불러오기"로 로봇의 현재 URDF를 기준으로 삼으세요';
+    return;
+  }
+  let xml;
+  try{
+    xml = buildModifiedUrdf();
+  }catch(err){
+    statusEl.textContent = '저장 취소 — ' + err.message;
+    return;
+  }
+  e.target.disabled = true;
+  try{
+    const res = await fetch('/save_urdf', {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: xml});
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const savedPath = await res.text();
+    statusEl.textContent = '저장됨: ' + savedPath;
+  }catch(err){
+    statusEl.textContent = '저장 실패 (로봇 로컬 서버에서만 동작) — ' + err.message;
+  }finally{
+    updateSaveGuard();
+  }
+});
+document.getElementById('ptsize').addEventListener('input', (e)=>{
+  const v = parseFloat(e.target.value);
+  state.lidarPts.material.size = v;
+  Object.values(state.camObjs).forEach(c=>c.pts.material.size=v);
+});
+document.querySelectorAll('#viewbtns button').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    const v = b.dataset.view;
+    orbit.target.set(0.1,0,0.6);
+    if(v==='iso') camera.position.set(2.4,-2.4,2.2);
+    if(v==='top') camera.position.set(0.1,0.01,4.8);
+    if(v==='front') camera.position.set(4.2,0.1,0.9);
+    if(v==='side') camera.position.set(0.1,4.2,0.9);
+    camera.lookAt(orbit.target);
+  });
+});
+
+function animate(){
+  requestAnimationFrame(animate);
+  orbit.update();
+  scene.background = new THREE.Color(bgColor());
+  grid.material.color.setHex(gridColor());
+  renderer.render(scene, camera);
+}
+
+init();
+document.querySelector('[data-view="iso"]').click();
+
+})();
+</script>
