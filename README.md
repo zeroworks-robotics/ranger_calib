@@ -23,6 +23,7 @@ Ranger 로봇의 RGBD 카메라 외부 파라미터(extrinsic)를 브라우저�
 | `index.html` | 3D 정렬 웹 UI (three.js) |
 | `urdf/` | 기준 URDF 및 저장 결과 URDF |
 | `data/` | 캡처된 포인트클라우드 스냅샷 (JSON) |
+| `tests/` | 자동 정렬 검증 스크립트 (로봇 없이 실행) |
 
 ## 요구 사항
 
@@ -180,6 +181,78 @@ DONE 6/6
 - BEST_EFFORT / RELIABLE QoS 양쪽을 동시에 구독해 드라이버 설정 차이를 흡수합니다.
 - 좌표값은 소수 4자리로 반올림한 평탄 배열(`[x,y,z,x,y,z,...]`)로 저장합니다.
 - `.tmp` 에 쓰고 `os.replace` 로 교체하므로, 읽는 쪽이 반쯤 쓰인 파일을 보는 일은 없습니다.
+
+## 개발 PC에서 확인하기
+
+로봇 없이 개발 PC(Windows/Linux)에서도 대부분 확인됩니다. ROS 토픽을 구독하는 캡처만 불가능합니다.
+
+| 기능 | 개발 PC | 비고 |
+| --- | --- | --- |
+| 자동 정렬 (ICP) | 동작 | `numpy`, `scipy` 만 필요 |
+| 3D 뷰·기즈모·수동 조정 | 동작 | 브라우저만 필요 |
+| `최신 URDF 불러오기` / `URDF 만들기` | 동작 | `CONA_URDF_PATH` 를 로컬 URDF 로 지정 |
+| `데이터 갱신` | 불가 | `capture_once.py` 가 `rclpy` 로 토픽을 직접 구독 |
+
+### 1. 파이썬 환경
+
+전역 환경을 건드리지 않으려면 가상환경을 씁니다.
+
+```powershell
+# Windows PowerShell
+py -m venv $HOME\venvs\ranger_calib
+& "$HOME\venvs\ranger_calib\Scripts\python.exe" -m pip install numpy scipy
+$py = "$HOME\venvs\ranger_calib\Scripts\python.exe"
+```
+
+```bash
+# Linux
+python3 -m venv ~/venvs/ranger_calib
+~/venvs/ranger_calib/bin/pip install numpy scipy
+py=~/venvs/ranger_calib/bin/python
+```
+
+### 2. 알고리즘 검증 (브라우저 없이)
+
+`tests/` 의 두 스크립트가 자동 정렬의 정확도와 안전장치를 검증합니다. 정상 종료 코드는 0 입니다.
+
+```powershell
+& $py tests\test_synth.py    # 알려진 양을 틀어 넣고 되찾는지
+& $py tests\test_slip.py     # 미끄러짐 검출기가 작동하는지
+```
+
+`test_synth.py` 는 카메라 점군을 라이다 자리에 그대로 놓아 정답을 만들고, 카메라 pose 만 10.8 mm / 0.54° 틀어 넣습니다. 기대 출력:
+
+```
+front  PASS    | 남은 오차 0.00mm 0.000deg ... 제외축 -
+fdown  PARTIAL | 남은 오차 4.00mm 0.400deg ... 제외축 rot_z,y
+```
+
+`PARTIAL` 은 실패가 아닙니다. `fdown`·`rear` 는 시야가 바닥에 치우쳐 일부 축이 구속되지 않으므로, 그 축은 보정을 버리고 원래값을 유지합니다. 그만큼 오차가 남는 것이 설계된 동작입니다.
+
+`test_slip.py` 는 바닥 평면만 있는 장면과 직교하는 벽 2개를 더한 장면을 합성해 비교합니다. 기대 출력:
+
+```
+바닥만            ok=True  제외축=rot_z,x,y        적용된 이동(mm)=[0.00, 0.00, -0.01]
+바닥+직교벽2        ok=True  제외축=-                적용된 이동(mm)=[-29.99, -0.03, 0.02]
+```
+
+30 mm 를 틀어 넣었을 때, 바닥만 있는 장면은 x 를 구속하지 못하므로 보정을 버리고(0.00 mm), 직교 벽이 있는 장면은 전부 되찾습니다(-29.99 mm).
+
+### 3. 웹 UI 확인
+
+`CONA_URDF_PATH` 를 저장소 안의 URDF 로 지정하면 불러오기와 저장까지 동작합니다.
+
+```powershell
+$env:CONA_URDF_PATH = "urdf\ranger_new.urdf"
+$env:RANGER_CALIB_PORT = "8099"
+& $py calib_server.py
+```
+
+브라우저에서 `http://127.0.0.1:8099` 를 열고 `자동 정렬` 을 누릅니다. 계산은 카메라 5대에 수십 초 걸립니다.
+
+저장을 눌러 생긴 `urdf/ranger_new_calib_*.urdf` 와 `urdf/ranger_new_latest.urdf` 는 확인 후 지우십시오 — `.gitignore` 가 타임스탬프 파일만 제외하므로 `_latest` 는 커밋 대상에 남습니다.
+
+주의: 이 상태로 자동 정렬을 돌리면 **5대 전부 `유지` 로 나오는 것이 정상입니다.** 커밋된 `data/` 가 일부 센서만 갱신된 스냅샷(`3/6` 실패)이라 보정 전 잔차가 이미 38~42 mm 입니다. 정확도 판정은 위 `tests/` 로 하고, 실데이터 정합은 로봇에서 `6/6` 을 확인한 뒤 하십시오.
 
 ## 설정
 

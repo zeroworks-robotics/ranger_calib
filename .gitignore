@@ -7,3 +7,10 @@ urdf/ranger_new_calib_*.urdf
 # 파이썬 캐시
 __pycache__/
 *.py[cod]
+
+# 가상환경
+.venv/
+venv/
+
+# 테스트 생성물
+tests/request.json
