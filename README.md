@@ -24,6 +24,7 @@ Ranger 로봇의 RGBD 카메라 외부 파라미터(extrinsic)를 브라우저�
 실행은 **로봇 본체(ROS 2 노드가 도는 장비)** 에서 합니다. 캡처 스크립트가 ROS 토픽을 직접 구독하기 때문입니다.
 
 - ROS 2 Humble (`/opt/ros/humble/setup.bash`)
+- `rosbridge_server` 패키지 (별도 터미널에서 먼저 띄웁니다 — 아래 [실행](#실행) 참고)
 - Python 3, `rclpy`, `numpy`, `sensor_msgs_py`
 - 브라우저 (three.js를 CDN에서 받으므로 **UI를 여는 쪽은 인터넷 연결 필요**)
 
@@ -40,11 +41,27 @@ Ranger 로봇의 RGBD 카메라 외부 파라미터(extrinsic)를 브라우저�
 
 ## 실행
 
-로봇에 접속해 저장소를 받고 서버를 띄웁니다.
+터미널 2개를 씁니다. 1번은 rosbridge, 2번은 캘리브레이션 서버입니다. 둘 다 로봇에서 실행합니다.
+
+### 터미널 1 — rosbridge
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch rosbridge_server rosbridge_websocket_launch.xml
+```
+
+작업이 끝날 때까지 이 터미널은 켜 둡니다.
+
+### 터미널 2 — 캘리브레이션 서버
 
 ```bash
 git clone git@github.com:zeroworks-robotics/ranger_calib.git
 cd ranger_calib
+
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=18
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
 python3 calib_server.py
 ```
 
