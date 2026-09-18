@@ -8,6 +8,10 @@ Ranger 로봇의 RGBD 카메라 외부 파라미터(extrinsic)를 브라우저�
 - 편집 대상: `base_link` → `camera_*RGBD_link` 조인트의 `<origin>`
 - 고정 참조: `rslidar` (회색 점, 드래그 불가)
 
+![웹 UI 화면](docs/ui-overview.png)
+
+위 화면은 `Rear` 카메라를 선택해 이동 기즈모로 조정 중인 상태입니다. 왼쪽은 3D 뷰(센서별 색상 범례 포함), 오른쪽은 작업 패널입니다. 하단의 갱신 상태 줄에 `갱신 실패 — front, right, left 응답 없음 (3/6)` 처럼 캡처 결과가 그대로 표시됩니다.
+
 ## 구성
 
 | 파일 | 역할 |
