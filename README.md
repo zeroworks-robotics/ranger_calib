@@ -57,13 +57,10 @@ ros2 launch rosbridge_server rosbridge_websocket_launch.xml
 ```bash
 git clone git@github.com:zeroworks-robotics/ranger_calib.git
 cd ranger_calib
-
-source /opt/ros/humble/setup.bash
-export ROS_DOMAIN_ID=18
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-
 python3 calib_server.py
 ```
+
+이 터미널은 ROS 환경이 필요 없습니다. `calib_server.py` 는 `rclpy` 를 쓰지 않는 순수 HTTP 서버이고, 캡처가 필요할 때마다 하위 셸을 띄워 그 안에서 `source` 와 `export` 를 직접 수행합니다.
 
 기동 시 콘솔에 읽어온 실사용 URDF 경로가 찍힙니다. 여기가 `MISSING` 이면 `CONA_URDF_PATH` 설정이 잘못된 것이므로 UI를 열기 전에 먼저 고쳐야 합니다.
 
