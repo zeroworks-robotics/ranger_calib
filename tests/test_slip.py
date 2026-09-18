@@ -1,14 +1,19 @@
-"""미끄러짐 검출기 테스트 — 자동 정렬의 핵심 안전장치를 검증한다.
+"""2단계(라이다 ICP) 미끄러짐 검출기 테스트.
 
-바닥 평면 하나만 겹치는 장면은 z, rot_x, rot_y 만 구속하고 x, y, rot_z 는
-구속하지 못한다. ICP 는 그래도 수렴하고 fitness·rmse 까지 좋게 나오므로,
-관측 가능성 판정이 없으면 엉뚱한 값을 그대로 적용한다.
+2단계는 x, y, rot_z 만 푼다. 이 세 축을 구속하는 것은 수직 면이고, 그것도
+서로 다른 방향의 면이 두 개 이상 있어야 한다. 벽이 하나뿐이면 그 벽에 평행한
+방향으로 미끄러진다 — ICP 는 수렴하고 fitness·rmse 까지 좋게 나오므로,
+관측 가능성 판정이 없으면 엉뚱한 값이 그대로 적용된다.
 
   python3 tests/test_slip.py
 
 합격 기준
-  1) 바닥만 있는 장면: x, y, rot_z 가 제외되고 그 축 보정이 0 이어야 한다
-  2) 직교하는 벽 2개를 더한 장면: 6 DOF 전부 구속돼 틀어 넣은 양을 되찾아야 한다
+  1) 벽 하나만 있는 장면: 벽에 평행한 y 가 제외되고 그 축 보정이 0.
+     x(벽 법선 방향)와 rot_z(벽 방향)는 벽 하나로도 구속되므로 살아 있어야 한다.
+  2) 직교하는 벽 두 개: x, y, rot_z 전부 구속돼 틀어 넣은 30mm 를 되찾는다
+
+바닥 면도 같이 넣는다. 2단계가 바닥을 제대로 걸러내는지(수직 면만 쓰는지)
+같이 확인하기 위해서다.
 """
 
 import os
@@ -22,7 +27,7 @@ sys.path.insert(0, ROOT)
 import auto_calib as ac      # noqa: E402
 
 NOISE = 0.002                # 2mm 측정 잡음
-PERTURB_X = 0.030            # 틀어 넣는 양 (m)
+PERTURB_X = 0.030            # x 로 틀어 넣는 양 (m)
 EX, EY, EZ = np.eye(3)
 rng = np.random.default_rng(0)
 
@@ -34,34 +39,38 @@ def plane(axis_a, axis_b, origin, span=1.2, step=0.02):
     return pts + rng.normal(0, NOISE, pts.shape)
 
 
-def floor_scene():
-    return plane(EX, EY, np.array([0.5, 0.0, -0.5]))
+def floor():
+    return plane(EX, EY, np.array([0.9, 0.0, 0.0]))
 
 
-def corner_scene():
+def one_wall():
+    """x 를 구속하는 벽 하나 + 바닥. y 와 rot_z 는 구속되지 않는다."""
+    return np.vstack([floor(), plane(EY, EZ, np.array([1.9, 0.0, 0.4]), span=0.9)])
+
+
+def two_walls():
+    """직교하는 벽 두 개 + 바닥. x, y, rot_z 전부 구속된다."""
     return np.vstack([
-        floor_scene(),
-        plane(EY, EZ, np.array([1.7, 0.0, 0.3]), span=0.8),    # x 를 구속하는 벽
-        plane(EX, EZ, np.array([0.5, 1.2, 0.3]), span=0.8),    # y, rot_z 를 구속하는 벽
+        floor(),
+        plane(EY, EZ, np.array([1.9, 0.0, 0.4]), span=0.9),
+        plane(EX, EZ, np.array([0.9, 1.4, 0.4]), span=0.9),
     ])
 
 
 def run(scene_fn, label):
-    """카메라와 라이다가 같은 면을 각각 독립 잡음으로 본 상태를 만든다.
+    """카메라와 라이다가 같은 장면을 각각 독립 잡음으로 본 상태를 만든다.
 
-    같은 점군을 그대로 두 번 쓰면 잡음 패턴 자체가 특징점이 되어
-    구속되지 않은 방향까지 맞춰져 버린다 (테스트가 통과해 버린다).
+    같은 점군을 두 번 쓰면 잡음 패턴이 특징점이 되어 구속되지 않은 축까지 맞춰진다.
     """
     cam_cloud = scene_fn()
     lidar_cloud = scene_fn()
 
-    # 카메라 pose: 정답은 단위변환, 초기값은 x 로 PERTURB_X 만큼 틀어 놓음
-    # file 은 로더를 바꿔 끼우므로 실제로 읽히지 않지만, 경로 조립에 쓰이므로 문자열이어야 한다
+    # 카메라 pose: 정답은 단위변환, 초기값은 x 로 PERTURB_X 만큼 틀어 놓음.
+    # 바닥이 이미 z=0 수평이라 1단계는 아무것도 바꾸지 않고, 2단계만 시험된다.
     cam = {"key": "test", "file": "synthetic.json",
            "xyz": [PERTURB_X, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0],
            "mount": {"xyz": [0.0, 0.0, 0.0], "quat": [0.0, 0.0, 0.0, 1.0]}}
 
-    # align_camera 는 파일에서 점군을 읽으므로 로더만 잠시 바꿔 끼운다
     original_loader = ac.load_cloud
     ac.load_cloud = lambda _path: cam_cloud
     try:
@@ -69,41 +78,54 @@ def run(scene_fn, label):
     finally:
         ac.load_cloud = original_loader
 
-    dropped = r.get("dropped_dofs", [])
-    applied = r.get("delta_trans_mm", [0.0, 0.0, 0.0])
-    print("%-14s ok=%-5s 제외축=%-16s 적용된 이동(mm)=[%s]"
-          % (label, r["ok"], ",".join(dropped) or "-",
-             ", ".join("%.2f" % v for v in applied)))
-    print("%14s sigma_trans_mm=%s sigma_rot_deg=%s reason=%s"
-          % ("", [round(v * 1000, 2) for v in r.get("sigma", {}).get("trans_m", [])],
-             [round(v, 3) for v in r.get("sigma", {}).get("rot_deg", [])],
-             r.get("reason")))
+    l = r["lidar"]
+    dropped = l.get("dropped_dofs", [])
+    print("%-16s 2단계=%-5s 제외축=%-14s x %7s  y %7s  rot_z %8s"
+          % (label, l.get("ok"), ",".join(dropped) or "-",
+             "%.2fmm" % l["fix_x_mm"] if "fix_x_mm" in l else "-",
+             "%.2fmm" % l["fix_y_mm"] if "fix_y_mm" in l else "-",
+             "%.3fdeg" % l["fix_yaw_deg"] if "fix_yaw_deg" in l else "-"))
+    print("%16s sigma: rot_z %s deg, x %s mm, y %s mm   reason=%s"
+          % ("", round(l.get("sigma", {}).get("rot_z_deg", -1), 3),
+             round(l.get("sigma", {}).get("x_m", -1) * 1000, 2),
+             round(l.get("sigma", {}).get("y_m", -1) * 1000, 2), l.get("reason")))
     return r
 
 
 def main():
     failures = []
 
-    r = run(floor_scene, "바닥만")
-    need = {"x", "y", "rot_z"}
-    missing = need - set(r.get("dropped_dofs", []))
-    if missing:
-        print("  FAIL: %s 가 제외되지 않음 — 미끄러진 값이 적용된다" % ", ".join(sorted(missing)))
-        failures.append("floor/dropped")
-    elif abs(r.get("delta_trans_mm", [9e9])[0]) > 0.5:
-        print("  FAIL: x 보정이 0 이 아님 (%.2fmm)" % r["delta_trans_mm"][0])
-        failures.append("floor/applied")
+    r = run(one_wall, "벽 하나+바닥")
+    l = r["lidar"]
+    dropped = set(l.get("dropped_dofs", []))
+    recovered = -l.get("fix_x_mm", 0.0)
+    if "y" not in dropped:
+        print("  FAIL: y 가 제외되지 않음 — 벽에 평행한 방향으로 미끄러진 값이 적용된다")
+        failures.append("one_wall/dropped")
+    elif abs(l.get("fix_y_mm", 99)) > 0.5:
+        print("  FAIL: y 보정이 0 이 아님 (%.2fmm)" % l["fix_y_mm"])
+        failures.append("one_wall/applied")
+    elif dropped - {"y"}:
+        print("  FAIL: 벽 하나로도 구속되는 축이 제외됨 (%s)" % ",".join(sorted(dropped - {"y"})))
+        failures.append("one_wall/overdrop")
+    elif abs(recovered - PERTURB_X * 1000) > 2.0:
+        print("  FAIL: x 를 %.2fmm 만 복원 (기대 %.0fmm)" % (recovered, PERTURB_X * 1000))
+        failures.append("one_wall/recover")
     else:
-        print("  PASS: x, y, rot_z 제외 + 보정 0")
+        print("  PASS: y 만 제외(보정 0), x %.2fmm 복원" % recovered)
 
-    r = run(corner_scene, "바닥+직교벽2")
-    recovered = -r.get("delta_trans_mm", [0.0])[0]      # 보정은 초기값을 정답으로 되돌리는 방향
-    if r.get("dropped_dofs"):
-        print("  FAIL: 6 DOF 전부 구속돼야 하는데 제외축 있음 (%s)" % ",".join(r["dropped_dofs"]))
-        failures.append("corner/dropped")
-    elif abs(recovered - PERTURB_X * 1000) > 1.0:
+    r = run(two_walls, "직교벽 둘+바닥")
+    l = r["lidar"]
+    recovered = -l.get("fix_x_mm", 0.0)      # 보정은 초기값을 정답으로 되돌리는 방향
+    if not l.get("ok"):
+        print("  FAIL: 2단계가 거부됨 — %s" % l.get("reason"))
+        failures.append("two_walls/rejected")
+    elif l.get("dropped_dofs"):
+        print("  FAIL: 세 축 전부 구속돼야 하는데 제외축 있음 (%s)" % ",".join(l["dropped_dofs"]))
+        failures.append("two_walls/dropped")
+    elif abs(recovered - PERTURB_X * 1000) > 2.0:
         print("  FAIL: %.2fmm 복원 (기대 %.0fmm)" % (recovered, PERTURB_X * 1000))
-        failures.append("corner/recover")
+        failures.append("two_walls/recover")
     else:
         print("  PASS: %.2fmm 복원 (기대 %.0fmm)" % (recovered, PERTURB_X * 1000))
 

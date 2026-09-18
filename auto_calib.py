@@ -1,7 +1,26 @@
-"""RGBD 카메라 외부 파라미터 자동 정렬 (point-to-plane ICP).
+"""RGBD 카메라 외부 파라미터 자동 정렬.
 
 웹 UI 의 '자동 정렬' 버튼이 calib_server.py 를 통해 이 스크립트를 호출한다.
 단독 실행도 된다:  python3 auto_calib.py request.json
+
+축마다 기준이 다르다
+--------------------
+라이다는 z=0.91 높이의 링 스캔이라 바닥을 못 본다 (실측: base_link 기준 z<0.25 구간에
+라이다 점 0개). 그래서 라이다 하나로 6 DOF 를 전부 잡으려 하면 roll, pitch, z 가
+구속되지 않은 채로 아무 값이나 나온다. 축을 기준에 맞춰 나눈다.
+
+  1단계 — 바닥 평면 (절대 기준)   -> rot_x, rot_y, z
+      평지에 선 로봇이면 바닥은 base_link 에서 z=0, 기울기 0 이어야 한다.
+      카메라 자신이 보는 바닥을 RANSAC 으로 골라 그 조건에 맞춘다.
+      URDF 주석의 과거 보정 이력(floor-plane recalib)이 쓴 방법과 같다.
+
+  2단계 — 라이다 ICP (상대 기준)  -> x, y, rot_z
+      바닥은 이 세 축을 구속하지 못한다 (평면 위를 미끄러진다).
+      라이다가 보는 수직 구조(벽·기물)에 point-to-plane ICP 로 맞춘다.
+      1단계 결과는 고정하고 세 축만 푼다.
+
+두 단계는 독립으로 판정한다. 라이다 겹침이 얇아 2단계가 거부돼도 1단계만 적용할 수 있고,
+그것만으로도 바닥이 그라운드에서 가라앉는 문제는 사라진다.
 
 입력(JSON): 화면의 현재 상태를 그대로 받는다. 상수를 여기에 복사해 두면
 index.html 과 값이 어긋나므로, 마운트 체인과 초기 origin 은 전부 호출자가 준다.
@@ -16,18 +35,7 @@ index.html 과 값이 어긋나므로, 마운트 체인과 초기 origin 은 전
     ]
   }
 
-출력(JSON): 카메라별 제안 origin + 판정 근거. 파일 저장은 하지 않는다.
-
-정합 방향에 대한 메모
---------------------
-라이다를 '타깃'으로 두는 편이 직관적이지만, 라이다는 링 스캔이라 점이 희박해
-법선 추정이 나쁘다. 그래서 반대로 잡는다.
-
-  타깃 = 카메라 점군 (밀집, 법선 양호) -> 여기서 평면 법선을 뽑는다
-  소스 = 라이다 점군 (기준 진리값)
-  라이다를 카메라 면에 맞추는 변환 T_d 를 구한 뒤, 카메라에 줄 보정은 그 역변환이다.
-
-  T_camera_new = inv(T_d) @ T_camera_current
+출력(JSON): 카메라별 제안 origin + 단계별 판정 근거. 파일 저장은 하지 않는다.
 """
 
 import json
@@ -39,48 +47,47 @@ from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+EZ = np.array([0.0, 0.0, 1.0])
 
-# ---- 정합 파라미터 ----
-# 초기값이 실측 URDF 라 이미 정답 근처다. 따라서 포착 범위를 넓게 잡을 이유가 없고,
-# 넓게 잡으면 오히려 벽 위의 다른 지점으로 대응이 붙어 엉뚱한 최소점으로 걸어간다
-# (실측 데이터에서 785mm, 892mm 짜리 오수렴을 실제로 만들었다).
-SCALES = [0.05, 0.02]            # 멀티스케일 voxel 크기 (m)
-CORR_MULT = 2.0                  # 대응점 최대 거리 = voxel * 이 값
-MAX_CORR_CAP = 0.12              # 대응점 최대 거리 상한 (m). 이 이상은 다른 평면으로 넘어간다
-STEP_TRANS_CAP = 0.02            # 반복 1회 평행이동 상한 (m)
-STEP_ROT_CAP = 0.0175            # 반복 1회 회전 상한 (rad, 약 1도)
-DIVERGE_TRANS = 0.10             # 누적 보정이 이만큼 넘으면 발산으로 보고 중단 (m)
-MAX_ITER = 40                    # 스케일별 최대 반복
-CONV_ROT = 1e-6                  # 수렴 판정 (rad)
-CONV_TRANS = 1e-6                # 수렴 판정 (m)
-BBOX_MARGIN = 0.30               # 시야 겹침 판정용 바운딩박스 여유 (m)
-NORMAL_K = 20                    # 법선 추정 이웃 개수
-MAX_CURVATURE = 0.08             # 곡률이 이보다 크면 평면이 아니므로 법선을 버린다
-TRIM_SIGMA = 3.0                 # 잔차 MAD 기준 이상치 제거 배수
-MIN_PAIRS = 80                   # 대응점이 이보다 적으면 판정 불가. 시야 안 라이다 점이
-                                 # 1,000~2,000개 수준이라 이보다 높이면 정상 장면도 거부된다
+# ---- 1단계: 바닥 평면 ----
+FLOOR_BAND = 0.40            # 바닥 후보 높이 상한 (m). base_link 원점이 바닥 위 0 이라고 본다
+FLOOR_THICK = 0.02           # 평면 두께 허용 (m)
+FLOOR_MAX_TILT = 20.0        # 수평에서 이 이상 기운 평면은 바닥이 아니다 (deg)
+FLOOR_ITERS = 400            # RANSAC 반복
+MIN_FLOOR_PTS = 500          # 인라이어 하한
+MAX_FLOOR_RMS = 0.015        # 바닥 평면 두께 상한 (m). 넘으면 바닥이 아닌 걸 잡았다
+MAX_TILT_FIX = 5.0           # 기울기 보정 상한 (deg)
+MAX_Z_FIX = 0.10             # z 보정 상한 (m)
 
-# ---- 수락/거부 기준 ----
-MIN_FITNESS = 0.30               # 겹침 비율 하한
-MAX_RMSE = 0.02                  # 정합 품질 상한 (m)
-MAX_TRANS_FIX = 0.05             # 평행이동 보정 상한 (m). 초기값이 실측이라 이 이상은 오수렴
-MAX_ROT_FIX = 5.0                # 회전 보정 상한 (deg)
-# 관측 불가 DOF 판정: 이보다 불확실하면 보정을 적용하지 않고 원래값을 유지한다
-SIGMA_TRANS_LIMIT = 0.010        # m
-SIGMA_ROT_LIMIT = 0.5            # deg
-# 상대 기준도 같이 본다. 잡음 때문에 법선이 몇 도씩 흔들리면 구속되지 않은 방향에도
-# 정보가 새어 들어와 절대 sigma 가 작게 나온다 (바닥만 보이는 장면에서 실측 2.9mm).
-# 같은 그룹(평행이동/회전) 안에서 가장 잘 구속된 축보다 이 배수 이상 나쁘면 버린다.
-SIGMA_RATIO_LIMIT = 15.0
-# 불확실도 계산에 쓰는 측정 잡음 하한 (m). 라이다·RGBD 거리 잡음 수준.
-# 달성된 rmse 만으로 스케일하면 안 된다: 구속되지 않은 방향도 잔차는 0 에 가깝게
-# 맞춰지므로 sigma 가 0 으로 나오고 미끄러짐 검출기가 울리지 않는다.
-SIGMA_MEAS_FLOOR = 0.005
+# ---- 2단계: 라이다 ICP (x, y, rot_z) ----
+SCALES = [0.05, 0.02]        # 멀티스케일 voxel 크기 (m)
+CORR_MULT = 2.0              # 대응점 최대 거리 = voxel * 이 값
+MAX_CORR_CAP = 0.12          # 대응점 최대 거리 상한 (m). 넘으면 다른 평면으로 건너뛴다
+STEP_TRANS_CAP = 0.02        # 반복 1회 평행이동 상한 (m)
+STEP_ROT_CAP = 0.0175        # 반복 1회 회전 상한 (rad, 약 1도)
+DIVERGE_TRANS = 0.10         # 누적 보정이 이만큼 넘으면 발산으로 보고 중단 (m)
+MAX_ITER = 40                # 스케일별 최대 반복
+CONV_ROT = 1e-6
+CONV_TRANS = 1e-6
+BBOX_MARGIN = 0.30           # 시야 겹침 판정용 바운딩박스 여유 (m)
+NORMAL_K = 20                # 법선 추정 이웃 개수
+MAX_CURVATURE = 0.08         # 곡률이 이보다 크면 평면이 아니므로 법선을 버린다
+VERTICAL_MIN_TILT = 30.0     # 2단계는 이 이상 기운 면만 쓴다 (deg). 바닥은 x,y,yaw 를
+                             # 구속하지 못하므로 넣으면 대응점만 늘고 해가 나빠진다
+TRIM_SIGMA = 3.0             # 잔차 MAD 기준 이상치 제거 배수
+MIN_PAIRS = 80               # 대응점 하한
+MIN_FITNESS = 0.30           # 겹침 비율 하한
+MAX_RMSE = 0.02              # 정합 품질 상한 (m)
+MAX_XY_FIX = 0.05            # x, y 보정 상한 (m)
+MAX_YAW_FIX = 5.0            # rot_z 보정 상한 (deg)
 
-# 보고용 DOF 이름. 앞 3개는 base_link 의 x, y, z 축을 중심으로 한 회전이며
-# URDF 의 roll/pitch/yaw(내재 ZYX 오일러각)와 정확히 같은 양은 아니다.
-# 보정량이 작을 때는 사실상 일치하지만, 이름을 rpy 로 쓰면 오해를 부른다.
-DOF_NAMES = ["rot_x", "rot_y", "rot_z", "x", "y", "z"]
+# 관측 불가 DOF 판정 (2단계). 절대·상대 기준을 모두 본다.
+SIGMA_TRANS_LIMIT = 0.010    # m
+SIGMA_ROT_LIMIT = 0.5        # deg
+SIGMA_RATIO_LIMIT = 15.0     # 같은 그룹 최량 축의 이 배수를 넘으면 버린다
+SIGMA_MEAS_FLOOR = 0.005     # 불확실도 계산에 쓰는 측정 잡음 하한 (m)
+
+RNG = np.random.default_rng(0)
 
 
 # ---------- 회전 표현 (URDF 규약: R = Rz(yaw) @ Ry(pitch) @ Rx(roll)) ----------
@@ -141,11 +148,11 @@ def estimate_normals(pts, k=NORMAL_K):
         return None, None
     tree = cKDTree(pts)
     _, idx = tree.query(pts, k=k, workers=-1)
-    nbrs = pts[idx]                                  # (N, k, 3)
+    nbrs = pts[idx]
     centered = nbrs - nbrs.mean(axis=1, keepdims=True)
     cov = np.einsum("nki,nkj->nij", centered, centered) / k
-    evals, evecs = np.linalg.eigh(cov)               # 고유값 오름차순
-    normals = evecs[:, :, 0]                         # 최소 고유값 방향 = 법선
+    evals, evecs = np.linalg.eigh(cov)
+    normals = evecs[:, :, 0]
     total = evals.sum(axis=1)
     curvature = np.where(total > 1e-12, evals[:, 0] / np.maximum(total, 1e-12), 1.0)
     return normals, curvature
@@ -160,18 +167,111 @@ def in_bbox(pts, ref, margin=BBOX_MARGIN):
     return np.all((pts >= lo) & (pts <= hi), axis=1)
 
 
-# ---------- ICP ----------
+# ---------- 1단계: 바닥 평면 ----------
 
-def icp_point_to_plane(src, tgt, tgt_normals, center, max_corr):
-    """소스를 타깃 평면에 맞추는 강체 변환을 구한다.
+def plane_metrics(normal, centroid):
+    """평면을 사람이 읽는 값으로: x·y 방향 기울기(deg)와 z 오프셋(m)."""
+    n = normal / np.linalg.norm(normal)
+    if n[2] < 0:
+        n = -n
+    return {
+        "slope_x_deg": float(np.degrees(np.arctan(-n[0] / n[2]))),
+        "slope_y_deg": float(np.degrees(np.arctan(-n[1] / n[2]))),
+        "z_off_m": float((centroid @ n) / n[2]),
+        "tilt_deg": float(np.degrees(np.arccos(np.clip(n[2], -1.0, 1.0)))),
+    }
 
-    반환: (T, stats). stats["info"] 는 정보행렬(6x6, [회전3, 평행이동3] 순).
-    회전은 center 를 중심으로 매개화한다. 원점 기준으로 두면 회전과 평행이동이
-    강하게 결합해 조건수가 나빠지고 DOF 별 불확실도 해석도 못 하게 된다.
+
+def segment_floor(pts):
+    """RANSAC 으로 바닥 평면을 고른다.
+
+    z 밴드 최소제곱으로 대신하면 안 된다: 벽 밑동이 섞여 기울기가 통째로 틀어진다
+    (실측 데이터에서 rear 가 0.2도 대신 -10.3도로 나왔다).
     """
+    cand = pts[pts[:, 2] < FLOOR_BAND]
+    if len(cand) < MIN_FLOOR_PTS:
+        return None, "바닥 후보 점 부족 (%d개)" % len(cand)
+
+    best = None
+    for _ in range(FLOOR_ITERS):
+        idx = RNG.choice(len(cand), 3, replace=False)
+        p0, p1, p2 = cand[idx]
+        n = np.cross(p1 - p0, p2 - p0)
+        nn = float(np.linalg.norm(n))
+        if nn < 1e-9:
+            continue
+        n = n / nn
+        if n[2] < 0:
+            n = -n
+        if np.degrees(np.arccos(np.clip(n[2], -1.0, 1.0))) > FLOOR_MAX_TILT:
+            continue
+        inl = np.abs(cand @ n - float(n @ p0)) < FLOOR_THICK
+        cnt = int(inl.sum())
+        if best is None or cnt > best[0]:
+            best = (cnt, inl)
+
+    if best is None or best[0] < MIN_FLOOR_PTS:
+        return None, "바닥 평면을 찾지 못함 (수평 면이 %d점 미만)" % MIN_FLOOR_PTS
+
+    inl_pts = cand[best[1]]
+    centroid = inl_pts.mean(axis=0)
+    _, _, vt = np.linalg.svd(inl_pts - centroid, full_matrices=False)
+    normal = vt[2]
+    if normal[2] < 0:
+        normal = -normal
+    resid = (inl_pts - centroid) @ normal
+
+    info = plane_metrics(normal, centroid)
+    info["normal"] = normal
+    info["centroid"] = centroid
+    info["rms_m"] = float(np.sqrt(np.mean(resid ** 2)))
+    info["count"] = int(len(inl_pts))
+    return info, None
+
+
+def level_correction(floor, center):
+    """바닥을 z=0 수평으로 만드는 보정. center 를 중심으로 회전한다.
+
+    반환: (R_level, dz). 카메라 위치의 x, y 는 건드리지 않는다 — 그 두 축은 바닥이
+    구속하지 못하므로 2단계(라이다)에 남겨야 한다.
+    """
+    n = floor["normal"]
+    axis = np.cross(n, EZ)
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm < 1e-12:
+        R_level = np.eye(3)
+    else:
+        angle = float(np.arccos(np.clip(n @ EZ, -1.0, 1.0)))
+        R_level = Rotation.from_rotvec(axis / axis_norm * angle).as_matrix()
+    leveled_centroid = center + R_level @ (floor["centroid"] - center)
+    return R_level, float(-leveled_centroid[2])
+
+
+# ---------- 2단계: 라이다 ICP (x, y, rot_z) ----------
+
+def build_rows(p, n, center):
+    """x, y, rot_z 세 축에 대한 야코비 행. 나머지 축은 1단계가 정한 값을 지킨다.
+
+    p' = p + w_z * (ez x (p - center)) + [tx, ty, 0]
+    """
+    rel = p - center
+    rot_z = np.cross(rel, n)[:, 2]          # (rel x n)_z = ez . (rel x n)
+    return np.column_stack([rot_z, n[:, 0], n[:, 1]])
+
+
+def step_transform(x, center):
+    """해 [w_z, tx, ty] 를 4x4 변환으로. center 기준 z축 회전 + xy 평행이동."""
+    w = clamp_norm(np.array([0.0, 0.0, x[0]]), STEP_ROT_CAP)
+    t = clamp_norm(np.array([x[1], x[2], 0.0]), STEP_TRANS_CAP)
+    R_d = Rotation.from_rotvec(w).as_matrix()
+    return make_transform(R_d, center - R_d @ center + t)
+
+
+def icp_xy_yaw(src, tgt, tgt_normals, center, max_corr):
+    """소스를 타깃 평면에 맞춘다. x, y, rot_z 만 움직인다."""
     T = np.eye(4)
     tree = cKDTree(tgt)
-    stats = {"info": np.zeros((6, 6)), "rmse": float("inf"), "pairs": 0}
+    stats = {"info": np.zeros((3, 3)), "rmse": float("inf"), "pairs": 0, "diverged": False}
 
     for _ in range(MAX_ITER):
         moved = apply_transform(T, src)
@@ -192,206 +292,197 @@ def icp_point_to_plane(src, tgt, tgt_normals, center, max_corr):
             if keep.sum() >= MIN_PAIRS:
                 p, q, n, resid = p[keep], q[keep], n[keep], resid[keep]
 
-        # p' = p + w x (p - center) + t 를 잔차에 대입해 선형화
-        A = np.hstack([np.cross(p - center, n), n])
+        A = build_rows(p, n, center)
         ATA = A.T @ A
-        ATb = A.T @ (-resid)
         try:
-            x = np.linalg.solve(ATA + 1e-12 * np.eye(6), ATb)
+            x = np.linalg.solve(ATA + 1e-12 * np.eye(3), A.T @ (-resid))
         except np.linalg.LinAlgError:
             break
 
-        w, t = x[:3], x[3:]
-        # 한 걸음의 크기를 묶는다. 선형화는 작은 각도에서만 유효하고,
-        # 큰 걸음을 허용하면 한 번에 다른 평면으로 건너뛴다.
-        w = clamp_norm(w, STEP_ROT_CAP)
-        t = clamp_norm(t, STEP_TRANS_CAP)
+        T = step_transform(x, center) @ T
+        stats = {"info": ATA, "rmse": float(np.sqrt(np.mean(resid ** 2))),
+                 "pairs": int(len(p)), "diverged": False}
 
-        R_d = Rotation.from_rotvec(w).as_matrix()
-        T_step = make_transform(R_d, center - R_d @ center + t)   # center 기준 회전 후 평행이동
-        T = T_step @ T
-
-        stats = {"info": ATA, "rmse": float(np.sqrt(np.mean(resid ** 2))), "pairs": int(len(p)),
-                 "diverged": False}
-
-        if np.linalg.norm(T[:3, 3] + T[:3, :3] @ center - center) > DIVERGE_TRANS:
+        moved_center = T[:3, 3] + T[:3, :3] @ center - center
+        if np.linalg.norm(moved_center) > DIVERGE_TRANS:
             stats["diverged"] = True
             break
-        if np.linalg.norm(w) < CONV_ROT and np.linalg.norm(t) < CONV_TRANS:
+        if abs(x[0]) < CONV_ROT and np.linalg.norm(x[1:]) < CONV_TRANS:
             break
 
     return T, stats
 
 
-def residual_rmse(src, tgt, tgt_normals, max_corr):
-    """변환 없이 그대로일 때의 점-평면 잔차 RMSE. 보정 전후 비교용."""
-    tree = cKDTree(tgt)
-    dist, idx = tree.query(src, k=1, workers=-1)
-    mask = dist < max_corr
-    if mask.sum() < MIN_PAIRS:
-        return None
-    resid = np.einsum("ij,ij->i", src[mask] - tgt[idx[mask]], tgt_normals[idx[mask]])
-    return float(np.sqrt(np.mean(resid ** 2)))
-
-
 def dof_sigma(info, rmse):
-    """정보행렬에서 DOF 별 1-sigma 불확실도를 뽑는다.
+    """정보행렬에서 축별 1-sigma 불확실도. 순서는 [rot_z, x, y].
 
-    공분산 = sigma_meas^2 * inv(info). 대각 제곱근이 각 DOF 의 표준편차다.
-    info 의 어떤 방향 고유값이 0 에 가까우면(평면 위 미끄러짐) 그 DOF 의 sigma 가 폭발한다.
-    이 값이 자동 정렬의 신뢰 여부를 판별하는 유일한 근거다.
+    공분산 = sigma_meas^2 * inv(info). 어떤 방향 고유값이 0 에 가까우면
+    (평면 위 미끄러짐) 그 축의 sigma 가 폭발한다.
 
-    sigma_meas 는 rmse 와 측정 잡음 하한 중 큰 값을 쓴다. rmse 만 쓰면
-    구속되지 않은 방향도 잔차가 0 에 가까워 sigma 가 0 으로 나오고, 검출기가 죽는다.
+    sigma_meas 는 rmse 와 측정 잡음 하한 중 큰 값이다. rmse 만 쓰면 구속되지 않은
+    방향도 잔차가 0 에 가까워 sigma 가 0 으로 나오고 검출기가 죽는다.
     """
     sigma_meas = max(rmse, SIGMA_MEAS_FLOOR)
     try:
-        cov = (sigma_meas ** 2) * np.linalg.inv(info)
-        diag = np.abs(np.diag(cov))
+        diag = np.abs(np.diag((sigma_meas ** 2) * np.linalg.inv(info)))
     except np.linalg.LinAlgError:
-        diag = np.full(6, np.inf)
+        diag = np.full(3, np.inf)
     sig = np.sqrt(diag)
-    return {
-        "rot_deg": [float(np.degrees(v)) for v in sig[:3]],
-        "trans_m": [float(v) for v in sig[3:]],
-    }
+    return {"rot_z_deg": float(np.degrees(sig[0])),
+            "x_m": float(sig[1]),
+            "y_m": float(sig[2])}
 
 
-def observable_mask(sigmas, abs_limit):
-    """축별 관측 가능 여부. 절대 기준과 상대 기준을 모두 만족해야 관측 가능으로 본다.
+def observable_mask(sigmas, abs_limits):
+    """축별 관측 가능 여부. 절대 기준과 상대 기준을 모두 만족해야 관측 가능.
 
-    절대 기준만 보면 잡음이 섞인 법선 때문에 미끄러지는 축도 통과한다.
-    상대 기준만 보면 장면 전체가 나쁠 때(모든 축이 고르게 나쁨) 전부 통과한다.
+    절대 기준만 보면 잡음 섞인 법선 때문에 미끄러지는 축도 통과한다.
+    상대 기준만 보면 장면 전체가 고르게 나쁠 때 전부 통과한다.
     """
     sig = np.asarray(sigmas, dtype=np.float64)
-    best = float(np.min(sig)) if np.all(np.isfinite(sig)) else 0.0
+    lim = np.asarray(abs_limits, dtype=np.float64)
+    scaled = sig / lim                       # 단위가 다른 축을 한 자에 올린다
+    best = float(np.min(scaled)) if np.all(np.isfinite(scaled)) else 0.0
     ratio_limit = best * SIGMA_RATIO_LIMIT if best > 0 else np.inf
-    return (sig <= abs_limit) & (sig <= ratio_limit)
+    return (scaled <= 1.0) & (scaled <= ratio_limit)
 
 
 # ---------- 카메라 1대 처리 ----------
 
 def align_camera(cam, lidar_base):
-    out = {"key": cam["key"], "ok": False, "reason": None, "dropped_dofs": []}
+    out = {"key": cam["key"], "ok": False, "floor": {"ok": False}, "lidar": {"ok": False}}
 
-    R_init = rpy_to_matrix(*cam["rpy"])
-    t_init = np.asarray(cam["xyz"], dtype=np.float64)
-    T_init = make_transform(R_init, t_init)
-    out["init_xyz"] = [float(v) for v in t_init]
+    R_cur = rpy_to_matrix(*cam["rpy"])
+    t_cur = np.asarray(cam["xyz"], dtype=np.float64)
+    out["init_xyz"] = [float(v) for v in t_cur]
     out["init_rpy"] = [float(v) for v in cam["rpy"]]
-    out["xyz"] = out["init_xyz"]          # 거부되면 원래값이 그대로 남는다
-    out["rpy"] = out["init_rpy"]
 
-    mount = cam["mount"]
     T_mount = make_transform(
-        Rotation.from_quat(mount["quat"]).as_matrix(),
-        np.asarray(mount["xyz"], dtype=np.float64),
-    )
-
+        Rotation.from_quat(cam["mount"]["quat"]).as_matrix(),
+        np.asarray(cam["mount"]["xyz"], dtype=np.float64))
     raw = load_cloud(os.path.join(ROOT, cam["file"]))
-    cam_base = apply_transform(T_init @ T_mount, raw)     # 카메라 점군을 base_link 로
 
-    # 겹침 영역만 남긴다. 카메라가 못 보는 방향의 라이다 점은 정합에 방해만 된다.
+    center = t_cur.copy()          # 회전 매개화 중심 = 카메라 위치 (회전·평행이동 분리)
+
+    # ---- 1단계: 바닥 평면으로 rot_x, rot_y, z ----
+    cam_base = apply_transform(make_transform(R_cur, t_cur) @ T_mount, raw)
+    floor, err = segment_floor(cam_base)
+    if floor is None:
+        out["floor"]["reason"] = err
+    else:
+        out["floor"].update({
+            "before": {"slope_x_deg": floor["slope_x_deg"],
+                       "slope_y_deg": floor["slope_y_deg"],
+                       "z_off_mm": floor["z_off_m"] * 1000},
+            "points": floor["count"],
+            "plane_rms_mm": floor["rms_m"] * 1000,
+        })
+        R_level, dz = level_correction(floor, center)
+        tilt_fix = float(np.degrees(np.linalg.norm(
+            Rotation.from_matrix(R_level).as_rotvec())))
+        out["floor"].update({"tilt_fix_deg": tilt_fix, "dz_mm": dz * 1000})
+
+        if floor["rms_m"] > MAX_FLOOR_RMS:
+            out["floor"]["reason"] = ("바닥 평면이 너무 두꺼움 (%.1fmm > %.0fmm) — 바닥이 아닌 면을 잡았을 수 있음"
+                                      % (floor["rms_m"] * 1000, MAX_FLOOR_RMS * 1000))
+        elif tilt_fix > MAX_TILT_FIX:
+            out["floor"]["reason"] = ("기울기 보정 과대 (%.2fdeg > %.1fdeg)" % (tilt_fix, MAX_TILT_FIX))
+        elif abs(dz) > MAX_Z_FIX:
+            out["floor"]["reason"] = ("z 보정 과대 (%.0fmm > %.0fmm)" % (dz * 1000, MAX_Z_FIX * 1000))
+        else:
+            R_cur = R_level @ R_cur
+            t_cur = t_cur + np.array([0.0, 0.0, dz])
+            out["floor"]["ok"] = True
+            # 보정 후 바닥을 다시 재서 결과를 보고한다 (기울기 0, z 0 에 가까워야 한다)
+            cam_base = apply_transform(make_transform(R_cur, t_cur) @ T_mount, raw)
+            after, _ = segment_floor(cam_base)
+            if after is not None:
+                out["floor"]["after"] = {"slope_x_deg": after["slope_x_deg"],
+                                         "slope_y_deg": after["slope_y_deg"],
+                                         "z_off_mm": after["z_off_m"] * 1000}
+
+    # ---- 2단계: 라이다 ICP 로 x, y, rot_z ----
     lidar_overlap = lidar_base[in_bbox(lidar_base, cam_base)]
-    out["lidar_in_view"] = int(len(lidar_overlap))
+    out["lidar"]["in_view"] = int(len(lidar_overlap))
     if len(lidar_overlap) < MIN_PAIRS:
-        out["reason"] = "시야가 겹치는 라이다 점 부족 (%d개)" % len(lidar_overlap)
-        return out
+        out["lidar"]["reason"] = "시야가 겹치는 라이다 점 부족 (%d개)" % len(lidar_overlap)
+    else:
+        T_d = np.eye(4)
+        stats = None
+        vertical_found = False
+        for voxel in SCALES:
+            tgt = voxel_downsample(cam_base, voxel)
+            normals, curvature = estimate_normals(tgt)
+            if normals is None:
+                continue
+            # 바닥은 x, y, rot_z 를 구속하지 못한다. 수직 구조만 남긴다.
+            tilt = np.degrees(np.arccos(np.clip(np.abs(normals @ EZ), -1.0, 1.0)))
+            keep = (curvature < MAX_CURVATURE) & (tilt > VERTICAL_MIN_TILT)
+            if keep.sum() < MIN_PAIRS:
+                continue
+            tgt, normals = tgt[keep], normals[keep]
+            vertical_found = True
 
-    center = t_init.copy()                # 회전 매개화 중심 = 카메라 위치
-    T_d = np.eye(4)
-    stats = None
+            max_corr = min(CORR_MULT * voxel, MAX_CORR_CAP)
+            src = apply_transform(T_d, voxel_downsample(lidar_overlap, voxel))
+            T_step, stats = icp_xy_yaw(src, tgt, normals, center, max_corr)
+            T_d = T_step @ T_d
+            if stats["diverged"]:
+                break
 
-    planes_found = False
-    for voxel in SCALES:
-        tgt = voxel_downsample(cam_base, voxel)
-        normals, curvature = estimate_normals(tgt)
-        if normals is None:
-            continue
-        flat = curvature < MAX_CURVATURE
-        if flat.sum() < MIN_PAIRS:
-            continue
-        tgt, normals = tgt[flat], normals[flat]
-        planes_found = True
+        if not vertical_found:
+            out["lidar"]["reason"] = "카메라 시야에 수직 면이 없음 — x, y, rot_z 를 구속할 구조가 필요"
+        elif stats is None or stats["pairs"] < MIN_PAIRS:
+            out["lidar"]["reason"] = ("대응점 부족 (%d개 < %d)"
+                                      % (0 if stats is None else stats["pairs"], MIN_PAIRS))
+        elif stats["diverged"]:
+            out["lidar"]["reason"] = "정합이 발산 (누적 보정 %.0fmm 초과)" % (DIVERGE_TRANS * 1000)
+        else:
+            src_fine = voxel_downsample(lidar_overlap, SCALES[-1])
+            fitness = float(stats["pairs"] / max(len(src_fine), 1))
+            sigma = dof_sigma(stats["info"], stats["rmse"])
+            out["lidar"].update({"fitness": fitness, "rmse_mm": stats["rmse"] * 1000,
+                                 "pairs": stats["pairs"], "sigma": sigma})
 
-        src_raw = voxel_downsample(lidar_overlap, voxel)
-        max_corr = min(CORR_MULT * voxel, MAX_CORR_CAP)
-        if "initial_rmse" not in out:
-            # 보정 전 잔차. 이 값이 이미 크면 정합 문제가 아니라 데이터 문제다
-            # (카메라와 라이다 스냅샷의 촬영 시각이 다르거나, 로봇이 움직였거나).
-            out["initial_rmse"] = residual_rmse(src_raw, tgt, normals, max_corr)
+            # 카메라에 줄 보정은 라이다를 움직인 변환의 역이다
+            T_fix = np.linalg.inv(T_d)
+            yaw_fix = float(Rotation.from_matrix(T_fix[:3, :3]).as_rotvec()[2])
+            xy_fix = (T_fix[:3, 3] + T_fix[:3, :3] @ center - center)[:2]
 
-        T_step, stats = icp_point_to_plane(apply_transform(T_d, src_raw),
-                                           tgt, normals, center, max_corr)
-        T_d = T_step @ T_d
-        if stats.get("diverged"):
-            out["reason"] = "정합이 발산 (누적 보정 %.0fmm 초과) — 초기값이나 스냅샷을 의심" % (DIVERGE_TRANS * 1000)
-            return out
+            keep = observable_mask([sigma["rot_z_deg"], sigma["x_m"], sigma["y_m"]],
+                                   [SIGMA_ROT_LIMIT, SIGMA_TRANS_LIMIT, SIGMA_TRANS_LIMIT])
+            dropped = [name for name, k in zip(["rot_z", "x", "y"], keep) if not k]
+            yaw_fix = yaw_fix if keep[0] else 0.0
+            xy_fix = np.array([xy_fix[0] if keep[1] else 0.0,
+                               xy_fix[1] if keep[2] else 0.0])
+            out["lidar"]["dropped_dofs"] = dropped
+            out["lidar"].update({"fix_x_mm": float(xy_fix[0] * 1000),
+                                 "fix_y_mm": float(xy_fix[1] * 1000),
+                                 "fix_yaw_deg": float(np.degrees(yaw_fix))})
 
-    if not planes_found:
-        out["reason"] = "카메라 점군에서 평면을 찾지 못함 (장면에 면 구조가 부족)"
-        return out
-    if stats is None or stats["pairs"] < MIN_PAIRS:
-        # 평면은 있는데 그 근처에 라이다 점이 없다 = 초기 오차가 대응 거리보다 큰 경우.
-        # 스냅샷 시각이 어긋났거나(로봇이 움직임) 초기 origin 이 많이 틀린 상태.
-        out["reason"] = ("대응점 부족 (%d개 < %d) — 초기 오차가 대응 거리 %.0fmm 보다 큼"
-                         % (0 if stats is None else stats["pairs"], MIN_PAIRS,
-                            min(CORR_MULT * SCALES[-1], MAX_CORR_CAP) * 1000))
-        return out
+            xy_norm = float(np.linalg.norm(xy_fix))
+            if fitness < MIN_FITNESS:
+                out["lidar"]["reason"] = "겹침 부족 (fitness %.2f < %.2f)" % (fitness, MIN_FITNESS)
+            elif stats["rmse"] > MAX_RMSE:
+                out["lidar"]["reason"] = ("정합 품질 미달 (rmse %.1fmm > %.0fmm)"
+                                          % (stats["rmse"] * 1000, MAX_RMSE * 1000))
+            elif xy_norm > MAX_XY_FIX:
+                out["lidar"]["reason"] = ("x, y 보정 과대 (%.0fmm > %.0fmm) — 오수렴 의심"
+                                          % (xy_norm * 1000, MAX_XY_FIX * 1000))
+            elif abs(np.degrees(yaw_fix)) > MAX_YAW_FIX:
+                out["lidar"]["reason"] = ("rot_z 보정 과대 (%.2fdeg > %.1fdeg) — 오수렴 의심"
+                                          % (np.degrees(yaw_fix), MAX_YAW_FIX))
+            elif len(dropped) == 3:
+                out["lidar"]["reason"] = "x, y, rot_z 전부 관측 불가 — 서로 다른 방향의 수직 면이 필요"
+            else:
+                R_yaw = Rotation.from_rotvec([0.0, 0.0, yaw_fix]).as_matrix()
+                R_cur = R_yaw @ R_cur
+                t_cur = t_cur + np.array([xy_fix[0], xy_fix[1], 0.0])
+                out["lidar"]["ok"] = True
 
-    src_fine = voxel_downsample(lidar_overlap, SCALES[-1])
-    out["fitness"] = float(stats["pairs"] / max(len(src_fine), 1))
-    out["inlier_rmse"] = stats["rmse"]
-    out["pairs"] = stats["pairs"]
-    out["sigma"] = dof_sigma(stats["info"], stats["rmse"])
-
-    # 카메라에 줄 보정은 라이다를 움직인 변환의 역이다.
-    T_new = np.linalg.inv(T_d) @ T_init
-    R_new, t_new = T_new[:3, :3], T_new[:3, 3]
-
-    # 보정량을 [roll,pitch,yaw,x,y,z] 6개로 분해한다. DOF 별 취소가 가능해야 한다.
-    rotvec = Rotation.from_matrix(R_new @ R_init.T).as_rotvec()
-    dtrans = t_new - t_init
-
-    keep_rot = observable_mask(out["sigma"]["rot_deg"], SIGMA_ROT_LIMIT)
-    keep_trans = observable_mask(out["sigma"]["trans_m"], SIGMA_TRANS_LIMIT)
-    for i, ok in enumerate(list(keep_rot) + list(keep_trans)):
-        if not ok:
-            out["dropped_dofs"].append(DOF_NAMES[i])
-
-    rotvec_masked = np.where(keep_rot, rotvec, 0.0)
-    dtrans_masked = np.where(keep_trans, dtrans, 0.0)
-
-    R_final = Rotation.from_rotvec(rotvec_masked).as_matrix() @ R_init
-    t_final = t_init + dtrans_masked
-
-    out["delta_trans_mm"] = [float(v * 1000.0) for v in dtrans_masked]
-    out["delta_rot_deg"] = [float(np.degrees(v)) for v in rotvec_masked]
-    trans_norm = float(np.linalg.norm(dtrans_masked))
-    rot_norm = float(np.degrees(np.linalg.norm(rotvec_masked)))
-    out["delta_trans_norm_mm"] = trans_norm * 1000.0
-    out["delta_rot_norm_deg"] = rot_norm
-
-    # 거부 기준. 조용히 통과시키면 자동화가 수동보다 위험해진다.
-    if out["fitness"] < MIN_FITNESS:
-        out["reason"] = "겹침 부족 (fitness %.2f < %.2f)" % (out["fitness"], MIN_FITNESS)
-        return out
-    if out["inlier_rmse"] > MAX_RMSE:
-        out["reason"] = "정합 품질 미달 (rmse %.1fmm > %.0fmm)" % (out["inlier_rmse"] * 1000, MAX_RMSE * 1000)
-        return out
-    if trans_norm > MAX_TRANS_FIX:
-        out["reason"] = "평행이동 보정 과대 (%.0fmm > %.0fmm) — 오수렴 의심" % (trans_norm * 1000, MAX_TRANS_FIX * 1000)
-        return out
-    if rot_norm > MAX_ROT_FIX:
-        out["reason"] = "회전 보정 과대 (%.2fdeg > %.1fdeg) — 오수렴 의심" % (rot_norm, MAX_ROT_FIX)
-        return out
-    if len(out["dropped_dofs"]) == 6:
-        out["reason"] = "6개 DOF 전부 관측 불가 — 장면에 직교하는 면이 필요"
-        return out
-
-    out["xyz"] = [float(v) for v in t_final]
-    out["rpy"] = matrix_to_rpy(R_final)
-    out["ok"] = True
+    out["xyz"] = [float(v) for v in t_cur]
+    out["rpy"] = matrix_to_rpy(R_cur)
+    out["ok"] = bool(out["floor"]["ok"] or out["lidar"]["ok"])
     return out
 
 
@@ -412,8 +503,7 @@ def main():
     lidar = req["lidar"]
     T_lidar = make_transform(
         Rotation.from_quat(lidar["quat"]).as_matrix(),
-        np.asarray(lidar["xyz"], dtype=np.float64),
-    )
+        np.asarray(lidar["xyz"], dtype=np.float64))
     lidar_base = apply_transform(T_lidar, load_cloud(os.path.join(ROOT, lidar["file"])))
 
     results = []
@@ -422,7 +512,8 @@ def main():
             results.append(align_camera(cam, lidar_base))
         except Exception as e:          # 한 대가 죽어도 나머지는 계속
             results.append({"key": cam.get("key"), "ok": False,
-                            "reason": "%s: %s" % (type(e).__name__, e)})
+                            "floor": {"ok": False}, "lidar": {"ok": False},
+                            "error": "%s: %s" % (type(e).__name__, e)})
 
     print(json.dumps({"results": results}, ensure_ascii=False), flush=True)
     return 0

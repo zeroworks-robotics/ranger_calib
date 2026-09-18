@@ -274,7 +274,7 @@
       <button id="btn-auto-align">자동 정렬 — 5개 카메라 계산</button>
       <div class="mini" id="auto-status">아직 실행 안 함</div>
       <div class="mini" id="auto-report"></div>
-      <div class="mini">라이다 점군에 카메라 점군을 맞추는 이동·회전량을 계산해 <b>화면에만 적용</b>합니다. 저장은 ③에서 직접 눌러야 합니다. 겹침·정합 품질·보정량이 기준을 못 넘기거나 방향이 구속되지 않으면 그 카메라(또는 그 축)는 원래값을 유지하고 이유를 표시합니다.</div>
+      <div class="mini">축마다 기준이 다릅니다. <b>rot_x, rot_y, z</b> 는 카메라가 보는 <b>바닥 평면</b>을 <code>z=0</code> 수평에 맞춰 잡고(절대 기준), <b>x, y, rot_z</b> 는 <b>라이다가 보는 수직 면</b>에 ICP 로 맞춰 잡습니다(상대 기준). 라이다는 바닥을 못 보고(링 스캔), 바닥은 x·y·rot_z 를 구속하지 못하므로 한 기준으로는 6축을 못 잡습니다. 결과는 <b>화면에만 적용</b>되고 저장은 ③에서 직접 눌러야 합니다. 단계별로 따로 판정하므로 한쪽만 적용되는 경우가 정상입니다.</div>
     </div>
 
     <hr class="sep">
@@ -869,18 +869,32 @@ function buildAutoRequest(){
   };
 }
 
+// 보고는 단계별로 따로 쓴다. 1단계(바닥)와 2단계(라이다)는 구속하는 축이 달라
+// 한쪽만 적용되는 경우가 정상이고, 어느 축이 왜 움직였는지 구분돼야 한다.
 function autoReportLine(r){
   const label = (CAMERAS.find(c=>c.key===r.key) || {}).label || r.key;
-  const nums = [];
-  if(typeof r.fitness === 'number') nums.push(`fitness ${r.fitness.toFixed(2)}`);
-  if(typeof r.inlier_rmse === 'number') nums.push(`rmse ${(r.inlier_rmse*1000).toFixed(1)}mm`);
-  if(typeof r.lidar_in_view === 'number') nums.push(`라이다 ${r.lidar_in_view}점`);
-  const tail = nums.length ? ` · ${nums.join(', ')}` : '';
-  if(!r.ok) return `<b>${label}</b>: 유지 — ${r.reason || '원인 불명'}${tail}`;
-  const fix = `이동 ${r.delta_trans_norm_mm.toFixed(1)}mm, 회전 ${r.delta_rot_norm_deg.toFixed(2)}°`;
-  const dropped = (r.dropped_dofs && r.dropped_dofs.length)
-    ? ` · 관측 불가로 제외: ${r.dropped_dofs.join(', ')}` : '';
-  return `<b>${label}</b>: 적용 (${fix})${tail}${dropped}`;
+  const lines = [];
+  if(r.error){
+    return `<b>${label}</b>: 실패 — ${r.error}`;
+  }
+  const f = r.floor || {}, l = r.lidar || {};
+
+  if(f.ok && f.before && f.after){
+    const slope = `기울기 ${Math.max(Math.abs(f.before.slope_x_deg), Math.abs(f.before.slope_y_deg)).toFixed(2)}° → ${Math.max(Math.abs(f.after.slope_x_deg), Math.abs(f.after.slope_y_deg)).toFixed(2)}°`;
+    const zoff = `z ${f.before.z_off_mm.toFixed(1)}mm → ${f.after.z_off_mm.toFixed(1)}mm`;
+    lines.push(`바닥 적용 — ${slope}, ${zoff} (rot_x, rot_y, z · 평면 ${f.points}점)`);
+  }else{
+    lines.push(`바닥 유지 — ${f.reason || '원인 불명'}`);
+  }
+
+  if(l.ok){
+    lines.push(`라이다 적용 — x ${l.fix_x_mm.toFixed(1)}mm, y ${l.fix_y_mm.toFixed(1)}mm, rot_z ${l.fix_yaw_deg.toFixed(2)}° (fitness ${l.fitness.toFixed(2)}, rmse ${l.rmse_mm.toFixed(1)}mm)`
+      + ((l.dropped_dofs && l.dropped_dofs.length) ? ` · 관측 불가로 제외: ${l.dropped_dofs.join(', ')}` : ''));
+  }else{
+    lines.push(`라이다 유지 — ${l.reason || '원인 불명'} (시야 ${l.in_view != null ? l.in_view : '?'}점)`);
+  }
+
+  return `<b>${label}</b><br>&nbsp;&nbsp;${lines.join('<br>&nbsp;&nbsp;')}`;
 }
 
 async function autoAlign(){
