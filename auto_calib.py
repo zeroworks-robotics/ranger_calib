@@ -409,6 +409,128 @@ def observable_mask(sigmas, abs_limits):
     return (scaled <= 1.0) & (scaled <= ratio_limit)
 
 
+# ---------- 3단계: 이웃 카메라 기준 정합 ----------
+# 라이다는 실측에서 base_link 기준 z=0.96m 아래를 전혀 보지 못한다 (아래로 향하는 빔이
+# 없다). 반면 내림각이 큰 카메라는 벽에서 0.3m 까지 붙어도 0.6~0.7m 높이까지만 본다.
+# 두 시야는 어떤 거리에서도 겹치지 않으므로, 이 카메라들의 x, y, rot_z 는 라이다로
+# 맞출 수 없다. 대신 이미 라이다로 맞춰진 이웃 카메라를 기준으로 삼는다.
+#
+# 주의: 기준의 오차가 그대로 전달된다 (연쇄). 그래서 2단계를 통과한 카메라만 기준으로 쓴다.
+
+NEIGHBOR_FLOOR_EXCLUDE = 0.06    # 이 높이 이하(바닥)는 제외. 바닥은 x, y, rot_z 를 못 잡는다
+NEIGHBOR_MIN_TARGET = 300        # 기준 점군의 수직면 점이 이보다 적으면 포기
+
+
+def align_to_neighbors(out, refs):
+    """라이다로 못 맞춘 카메라를 이미 맞춰진 카메라에 붙인다. x, y, rot_z 만 움직인다.
+
+    refs: [(key, 기준 카메라 점군(base_link, 정렬 완료))] — 2단계를 통과한 것만
+    """
+    info = {"ok": False, "references": [r[0] for r in refs]}
+    out["neighbor"] = info
+
+    if not refs:
+        info["reason"] = "라이다로 정렬된 기준 카메라가 없음 — 먼저 다른 카메라의 2단계를 통과시켜야 함"
+        return
+
+    src_all = out.pop("_cloud", None)
+    if src_all is None or len(src_all) == 0:
+        info["reason"] = "점군이 없음"
+        return
+
+    R_cur = rpy_to_matrix(*out["rpy"])
+    t_cur = np.asarray(out["xyz"], dtype=np.float64)
+    center = t_cur.copy()
+
+    src = src_all[src_all[:, 2] > NEIGHBOR_FLOOR_EXCLUDE]
+    if len(src) < MIN_PAIRS:
+        info["reason"] = "바닥 위 점이 부족 (%d개) — 벽이나 기물이 시야에 필요" % len(src)
+        return
+
+    ref_pts = np.vstack([c for _, c in refs])
+    ref_pts = ref_pts[ref_pts[:, 2] > NEIGHBOR_FLOOR_EXCLUDE]
+    ref_pts = ref_pts[in_bbox(ref_pts, src)]
+    info["overlap_points"] = int(len(ref_pts))
+    if len(ref_pts) < NEIGHBOR_MIN_TARGET:
+        info["reason"] = ("기준 카메라와 겹치는 영역이 부족 (%d점) — 두 카메라가 같은 벽을 보게 하십시오"
+                          % len(ref_pts))
+        return
+
+    T_d = np.eye(4)
+    stats = None
+    vertical_found = False
+    for voxel in SCALES:
+        tgt = voxel_downsample(ref_pts, voxel)
+        normals, curvature = estimate_normals(tgt)
+        if normals is None:
+            continue
+        tilt = np.degrees(np.arccos(np.clip(np.abs(normals @ EZ), -1.0, 1.0)))
+        keep = (curvature < MAX_CURVATURE) & (tilt > VERTICAL_MIN_TILT)
+        if keep.sum() < MIN_PAIRS:
+            continue
+        tgt, normals = tgt[keep], normals[keep]
+        vertical_found = True
+        # 여기서는 소스가 카메라 자신이다. 라이다를 움직이던 2단계와 달리 역변환이 필요 없다.
+        moved = apply_transform(T_d, voxel_downsample(src, voxel))
+        T_step, stats = icp_xy_yaw(moved, tgt, normals, center,
+                                   min(CORR_MULT * voxel, MAX_CORR_CAP))
+        T_d = T_step @ T_d
+        if stats["diverged"]:
+            break
+
+    if not vertical_found:
+        info["reason"] = "겹치는 영역에 수직 면이 없음 — 두 카메라가 같은 벽(또는 기물)을 보게 하십시오"
+        return
+    if stats is None or stats["pairs"] < MIN_PAIRS:
+        info["reason"] = "대응점 부족 (%d개 < %d)" % (0 if stats is None else stats["pairs"], MIN_PAIRS)
+        return
+    if stats["diverged"]:
+        info["reason"] = "정합이 발산 (누적 보정 %.0fmm 초과)" % (DIVERGE_TRANS * 1000)
+        return
+
+    src_fine = voxel_downsample(src, SCALES[-1])
+    fitness = float(stats["pairs"] / max(len(src_fine), 1))
+    sigma = dof_sigma(stats["info"], stats["rmse"])
+    info.update({"fitness": fitness, "rmse_mm": stats["rmse"] * 1000,
+                 "pairs": stats["pairs"], "sigma": sigma})
+
+    yaw_fix = float(Rotation.from_matrix(T_d[:3, :3]).as_rotvec()[2])
+    xy_fix = (T_d[:3, 3] + T_d[:3, :3] @ center - center)[:2]
+
+    keep_dof = observable_mask([sigma["rot_z_deg"], sigma["x_m"], sigma["y_m"]],
+                               [SIGMA_ROT_LIMIT, SIGMA_TRANS_LIMIT, SIGMA_TRANS_LIMIT])
+    dropped = [n for n, k in zip(["rot_z", "x", "y"], keep_dof) if not k]
+    yaw_fix = yaw_fix if keep_dof[0] else 0.0
+    xy_fix = np.array([xy_fix[0] if keep_dof[1] else 0.0,
+                       xy_fix[1] if keep_dof[2] else 0.0])
+    info["dropped_dofs"] = dropped
+    info.update({"fix_x_mm": float(xy_fix[0] * 1000), "fix_y_mm": float(xy_fix[1] * 1000),
+                 "fix_yaw_deg": float(np.degrees(yaw_fix))})
+
+    xy_norm = float(np.linalg.norm(xy_fix))
+    if fitness < MIN_FITNESS:
+        info["reason"] = "겹침 부족 (fitness %.2f < %.2f)" % (fitness, MIN_FITNESS)
+        return
+    if stats["rmse"] > MAX_RMSE:
+        info["reason"] = "정합 품질 미달 (rmse %.1fmm > %.0fmm)" % (stats["rmse"] * 1000, MAX_RMSE * 1000)
+        return
+    if xy_norm > MAX_XY_FIX:
+        info["reason"] = "x, y 보정 과대 (%.0fmm > %.0fmm) — 오수렴 의심" % (xy_norm * 1000, MAX_XY_FIX * 1000)
+        return
+    if abs(np.degrees(yaw_fix)) > MAX_YAW_FIX:
+        info["reason"] = "rot_z 보정 과대 (%.2fdeg > %.1fdeg) — 오수렴 의심" % (np.degrees(yaw_fix), MAX_YAW_FIX)
+        return
+    if len(dropped) == 3:
+        info["reason"] = "x, y, rot_z 전부 관측 불가 — 서로 다른 방향의 수직 면이 필요"
+        return
+
+    R_new = Rotation.from_rotvec([0.0, 0.0, yaw_fix]).as_matrix() @ R_cur
+    out["xyz"] = [float(v) for v in (t_cur + np.array([xy_fix[0], xy_fix[1], 0.0]))]
+    out["rpy"] = matrix_to_rpy(R_new)
+    out["ok"] = True
+    info["ok"] = True
+
+
 # ---------- 장면 가이드 ----------
 # 사용자가 다음에 무엇을 해야 하는지 알려주기 위한 계산. 라이다는 360도를 보므로
 # 벽이 어디 있는지 알 수 있고, 카메라 광축 방위와 비교하면 필요한 회전량이 나온다.
@@ -480,7 +602,11 @@ def turn_words(turn):
             int(round(abs(turn) / ROTATE_ROUND_DEG) * ROTATE_ROUND_DEG))
 
 
-def wall_guidance(cam_clusters, cam_az, cam_elev, cam_height, lidar_clusters, corners):
+CLOSEST_PRACTICAL_M = 0.30       # 로봇을 벽에 이보다 더 붙이기는 어렵다
+
+
+def wall_guidance(cam_clusters, cam_az, cam_elev, cam_height, lidar_clusters, corners,
+                  lidar_min_z=None):
     """카메라 한 대에 대한 장면 가이드. 벽만으로 해결하는 방법을 안내한다.
 
     cam_clusters: 그 카메라가 실제로 보고 있는 수직 면 (법선 방향별)
@@ -507,6 +633,21 @@ def wall_guidance(cam_clusters, cam_az, cam_elev, cam_height, lidar_clusters, co
         out["level"] = "ok"
         out["text"] = "벽 방향 2개 이상 보임 — x, y, rot_z 모두 구속 가능"
         return out
+
+    # 라이다와 시야 대역이 아예 겹치지 않는 카메라는 접근해도 소용이 없다.
+    # 실측: 라이다는 z=0.96m 아래를 보지 못하고, 내림각 54도 카메라는 벽에 0.3m 까지
+    # 붙어도 0.60m 위를 못 본다. 이 경우 3단계(이웃 카메라 기준)로 넘긴다.
+    top_elev = cam_elev + CAM_VFOV_DEG / 2.0
+    if lidar_min_z is not None and top_elev < 0.0:
+        best_reach_z = cam_height + CLOSEST_PRACTICAL_M * np.tan(np.radians(top_elev))
+        if best_reach_z < lidar_min_z:
+            out["level"] = "lidar_blind"
+            out["text"] = ("라이다는 z=%.2fm 아래를 보지 못하고, 이 카메라는 벽에 %.1fm 까지 붙어도 "
+                           "z=%.2fm 위를 못 봅니다 — x, y, rot_z 를 라이다로 맞출 방법이 없습니다. "
+                           "이미 라이다로 정렬된 카메라와 같은 벽·기물을 함께 보게 배치하십시오 "
+                           "(3단계가 자동으로 그 카메라를 기준으로 붙입니다)"
+                           % (lidar_min_z, CLOSEST_PRACTICAL_M, best_reach_z))
+            return out
 
     # 구석을 우선 노린다. 직각인 두 벽이 한 시야에 들어오면 세 축이 한 번에 구속된다.
     target, kind = None, None
@@ -575,8 +716,16 @@ def scene_summary(results):
         lines.append("벽을 충분히 보는 카메라: %s" % ", ".join(ok))
     lines.append("장면이 부족한 카메라: %s" % ", ".join(r["key"] for r in need))
 
+    # 라이다와 시야가 아예 겹치지 않는 카메라는 3단계(이웃 카메라 기준)로만 해결된다.
+    blind = [r["key"] for r in need if r["advice"].get("level") == "lidar_blind"]
+    if blind:
+        lines.append("%s 는 라이다와 시야 대역이 겹치지 않습니다 — 이미 정렬된 카메라와 같은 벽을 "
+                     "함께 보게 두면 3단계가 그 카메라를 기준으로 붙입니다" % ", ".join(blind))
+
     # 접근 거리가 필요한 카메라를 먼저 알린다. 회전만으로는 해결되지 않기 때문이다.
-    approach = [r for r in need if r["advice"].get("max_wall_distance_m")]
+    approach = [r for r in need
+                if r["advice"].get("max_wall_distance_m")
+                and r["advice"].get("level") != "lidar_blind"]
     if approach:
         worst = min(approach, key=lambda r: r["advice"]["max_wall_distance_m"])
         lines.append("%s 는 내림각이 커서 벽에서 %.1fm 이내로 접근해야 합니다"
@@ -734,6 +883,9 @@ def align_camera(cam, lidar_base):
     out["ok"] = bool(out["floor"]["ok"] or out["lidar"]["ok"])
 
     # 장면 진단: 이 카메라가 어느 방향의 벽을 보고 있는지. 가이드 계산에 쓴다.
+    # 3단계(이웃 카메라 기준)에서 쓸 최종 점군. main 이 JSON 으로 내보내기 전에 지운다.
+    out["_cloud"] = apply_transform(make_transform(R_cur, t_cur) @ T_mount, raw)
+
     cam_az, cam_elev = camera_look(out["rpy"], T_mount)
     out["scene"] = {
         "vertical_planes": vertical_plane_clusters(cam_base),
@@ -765,7 +917,26 @@ def main():
     lidar_base = apply_transform(T_lidar, load_cloud(os.path.join(ROOT, lidar["file"])))
 
     results = []
+    extra_refs = []
     for cam in req["cams"]:
+        # "reference": true 인 카메라는 계산하지 않고 기준으로만 쓴다. 이전 회차에서
+        # 이미 정렬해 잠근 카메라를 화면이 이렇게 넘긴다 (3단계의 기준이 된다).
+        if cam.get("reference"):
+            try:
+                T_ref = make_transform(rpy_to_matrix(*cam["rpy"]),
+                                       np.asarray(cam["xyz"], dtype=np.float64))
+                T_m = make_transform(
+                    Rotation.from_quat(cam["mount"]["quat"]).as_matrix(),
+                    np.asarray(cam["mount"]["xyz"], dtype=np.float64))
+                extra_refs.append((cam["key"], apply_transform(
+                    T_ref @ T_m, load_cloud(os.path.join(ROOT, cam["file"])))))
+                results.append({"key": cam["key"], "role": "reference", "ok": False,
+                                "floor": {"ok": False}, "lidar": {"ok": False}})
+            except Exception as e:
+                results.append({"key": cam.get("key"), "role": "reference", "ok": False,
+                                "floor": {"ok": False}, "lidar": {"ok": False},
+                                "error": "%s: %s" % (type(e).__name__, e)})
+            continue
         try:
             results.append(align_camera(cam, lidar_base))
         except Exception as e:          # 한 대가 죽어도 나머지는 계속
@@ -773,8 +944,19 @@ def main():
                             "floor": {"ok": False}, "lidar": {"ok": False},
                             "error": "%s: %s" % (type(e).__name__, e)})
 
-    # 라이다는 360도를 보므로 주변 벽의 위치를 알려준다. 카메라 시야 방위와 비교해
-    # "어느 방향으로 얼마나 회전하면 이 카메라가 벽을 보는지" 를 계산한다.
+    # 3단계: 라이다로 못 맞춘 카메라를 이미 맞춰진 카메라에 붙인다.
+    refs = extra_refs + [(r["key"], r["_cloud"]) for r in results
+                         if r.get("lidar", {}).get("ok") and r.get("_cloud") is not None]
+    for r in results:
+        if r.get("lidar", {}).get("ok") or "_cloud" not in r:
+            continue
+        try:
+            align_to_neighbors(r, [(k, c) for k, c in refs if k != r["key"]])
+        except Exception as e:
+            r["neighbor"] = {"ok": False, "reason": "%s: %s" % (type(e).__name__, e)}
+    for r in results:
+        r.pop("_cloud", None)        # 점군은 JSON 으로 내보내지 않는다
+
     lidar_walls = vertical_plane_clusters(lidar_base, voxel=0.05, min_pts=120)
     corners = find_corners(lidar_walls)
     for r in results:
@@ -783,7 +965,8 @@ def main():
             r["advice"] = wall_guidance(scene["vertical_planes"],
                                         scene["camera_azimuth_deg"],
                                         scene["camera_elevation_deg"],
-                                        scene["camera_height_m"], lidar_walls, corners)
+                                        scene["camera_height_m"], lidar_walls, corners,
+                                        lidar_min_z=float(lidar_base[:, 2].min()))
 
     print(json.dumps({
         "results": results,
